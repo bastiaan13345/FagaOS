@@ -1,0 +1,22 @@
+{
+  "name": "@fagaos/control-plane",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "FagaOS control-plane API stubs. Session lifecycle, tool invocation, kill, audit-log fetch. Every call is wired into the @fagaos/audit-log primitive (which is the FAG-8 canonical chain under the hood).",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./http": "./dist/http.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fagaos/agent-manifest": "*",
+    "@fagaos/audit-log": "*",
+    "zod": "^3.23.0"
+  }
+}

@@ -26,6 +26,7 @@
     { "path": "./packages/policy" },
     { "path": "./packages/runtime" },
     { "path": "./packages/connectors" },
-    { "path": "./packages/desktop-bridge" }
+    { "path": "./packages/desktop-bridge" },
+    { "path": "./packages/qa-harness" }
   ]
 }

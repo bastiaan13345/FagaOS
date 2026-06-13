@@ -1,0 +1,306 @@
+{
+  "$id": "https://fagaos.dev/schemas/agent-card/v1.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "FagaOS AgentCard",
+  "description": "Runtime contract for declaring an agent's identity, capabilities, MCP endpoints, auth requirements, owner, and version. Phase 0 contract (FAG-9, unified into FAG-8 monorepo in FAG-10).",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "const": "https://fagaos.dev/schemas/agent-card/v1.json",
+      "default": "https://fagaos.dev/schemas/agent-card/v1.json"
+    },
+    "id": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "owner": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "constraints": {
+            "type": "object",
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            }
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "default": []
+    },
+    "auth": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "bearer"
+            },
+            "secretRef": {
+              "type": "string"
+            },
+            "audience": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "secretRef"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "oauth2"
+            },
+            "flow": {
+              "type": "string",
+              "enum": [
+                "authorization_code",
+                "client_credentials"
+              ]
+            },
+            "secretRef": {
+              "type": "string"
+            },
+            "authorizationEndpoint": {
+              "type": "string"
+            },
+            "tokenEndpoint": {
+              "type": "string"
+            },
+            "scopes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          },
+          "required": [
+            "kind",
+            "flow",
+            "secretRef"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "mtls"
+            },
+            "certRef": {
+              "type": "string"
+            },
+            "keyRef": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "certRef",
+            "keyRef"
+          ],
+          "additionalProperties": false
+        }
+      ],
+      "discriminator": {
+        "propertyName": "kind"
+      }
+    },
+    "mcpEndpoints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "server",
+              "client"
+            ]
+          },
+          "transport": {
+            "type": "string",
+            "enum": [
+              "stdio",
+              "http+sse",
+              "streamable-http"
+            ]
+          },
+          "url": {
+            "type": "string"
+          },
+          "command": {
+            "type": "string"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "env": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "role",
+          "transport"
+        ],
+        "additionalProperties": false
+      },
+      "default": []
+    },
+    "toolServers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "implementation": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "desktop",
+              "browser",
+              "email",
+              "messaging",
+              "calendar",
+              "filesystem",
+              "shell",
+              "code-exec",
+              "other"
+            ]
+          },
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "implementation",
+          "category",
+          "endpoints"
+        ],
+        "additionalProperties": false
+      },
+      "default": []
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "boolean"
+          }
+        ]
+      }
+    },
+    "createdAt": {
+      "type": "string",
+      "default": "2026-06-13T13:26:33.859Z"
+    }
+  },
+  "required": [
+    "id",
+    "name",
+    "version",
+    "owner",
+    "auth"
+  ],
+  "additionalProperties": false
+}

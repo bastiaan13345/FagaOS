@@ -1,0 +1,19 @@
+{
+  "name": "@fagaos/control-plane-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "FagaOS control-plane HTTP server. Boots the API stubs from @fagaos/control-plane over a real TCP port, backed by the FAG-8 audit log primitive (via @fagaos/audit-log).",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -b",
+    "start": "node dist/main.js",
+    "dev": "tsx src/main.ts"
+  },
+  "dependencies": {
+    "@fagaos/agent-manifest": "*",
+    "@fagaos/audit-log": "*",
+    "@fagaos/control-plane": "*",
+    "zod": "^3.23.0"
+  }
+}

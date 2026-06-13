@@ -1,0 +1,20 @@
+{
+  "name": "@fagaos/audit-log",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Append-only, hash-chained audit log — the FAG-8 canonical primitive re-exported with a Zod-validated compatibility layer for the FAG-9 control plane. The chain is the FAG-8 InMemoryAuditLog / FileBackedAuditLog; this package is a thin convenience surface.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fagaos/core": "*",
+    "zod": "^3.23.0"
+  }
+}

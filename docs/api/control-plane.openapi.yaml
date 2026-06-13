@@ -1,0 +1,343 @@
+openapi: 3.0.3
+info:
+  title: FagaOS Control-Plane API
+  version: 0.1.0
+  description: |
+    Phase 0 control-plane stubs (FAG-9). The orchestrator uses these
+    endpoints to manage agents, sessions, and tool invocations.
+
+    Every call produces an entry in the audit log primitive
+    (FAG-8). The chain is append-only, SHA-256 hash-chained, and
+    verifiable.
+
+    This is a stub surface: tool invocations are dispatched through
+    `stubToolGateway` until FAG-4 (desktop/browser) and FAG-5
+    (integrations) plug in concrete tool servers.
+  contact:
+    name: FagaOS Platform & Security Lead
+  license:
+    name: Proprietary
+servers:
+  - url: http://127.0.0.1:8080
+    description: Phase 0 local development
+
+tags:
+  - name: sessions
+    description: Session lifecycle (create, inspect, tear down, kill, log).
+  - name: tools
+    description: Tool invocation through the sandbox gateway.
+  - name: cards
+    description: Agent card registration.
+
+paths:
+  /sessions:
+    post:
+      tags: [sessions]
+      summary: Create a new session bound to a registered AgentCard
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSessionRequest"
+      responses:
+        "200":
+          description: Session created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session]
+                properties:
+                  session:
+                    $ref: "#/components/schemas/Session"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /sessions/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string }
+    get:
+      tags: [sessions]
+      summary: Inspect a session
+      responses:
+        "200":
+          description: Session details
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session]
+                properties:
+                  session: { $ref: "#/components/schemas/Session" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [sessions]
+      summary: Tear down a session (graceful; marks completed first)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Ok" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /sessions/{id}/tools/{tool}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string }
+      - in: path
+        name: tool
+        required: true
+        schema: { type: string }
+    post:
+      tags: [tools]
+      summary: Invoke a tool through the sandbox gateway (stubbed execution in Phase 0)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InvokeToolRequest"
+      responses:
+        "200":
+          description: Tool result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [result]
+                properties:
+                  result: { $ref: "#/components/schemas/ToolResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /sessions/{id}/kill:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string }
+    post:
+      tags: [sessions]
+      summary: Hard-stop a session
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KillRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Ok" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /sessions/{id}/log:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string }
+      - in: query
+        name: sinceSeq
+        schema: { type: integer, minimum: 0 }
+        description: Audit-log sequence to start from (inclusive).
+      - in: query
+        name: limit
+        schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+    get:
+      tags: [sessions]
+      summary: Read audit-log entries for the session
+      responses:
+        "200":
+          description: Paged audit entries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entries]
+                properties:
+                  entries:
+                    type: array
+                    items: { $ref: "#/components/schemas/AuditEntry" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /cards:
+    post:
+      tags: [cards]
+      summary: Register or update an AgentCard (in-memory; Phase 0 dev convenience)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentCard" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Ok" }
+
+components:
+  responses:
+    BadRequest:
+      description: Invalid input
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Conflict (e.g. session already terminal)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Ok:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean, enum: [true] }
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error: { type: string }
+        message: { type: string }
+    CreateSessionRequest:
+      type: object
+      required: [agentId, createdBy]
+      properties:
+        agentId: { type: string }
+        createdBy:
+          type: object
+          required: [id, type]
+          properties:
+            id: { type: string }
+            type: { type: string, enum: [user, agent, system] }
+        input:
+          type: object
+          additionalProperties: true
+          default: {}
+        agentCard:
+          $ref: "#/components/schemas/AgentCard"
+    InvokeToolRequest:
+      type: object
+      properties:
+        arguments:
+          type: object
+          additionalProperties: true
+          default: {}
+    KillRequest:
+      type: object
+      properties:
+        reason: { type: string, default: "killed by caller" }
+    Session:
+      type: object
+      required:
+        - id
+        - agentId
+        - agentVersion
+        - agentCardHash
+        - state
+        - createdAt
+        - updatedAt
+        - createdBy
+      properties:
+        id: { type: string, format: uuid }
+        agentId: { type: string }
+        agentVersion: { type: string }
+        agentCardHash:
+          type: string
+          description: SHA-256 hex of the AgentCard at session creation time.
+        state:
+          type: string
+          enum: [pending, running, suspended, completed, killed, crashed]
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        createdBy:
+          type: object
+          required: [id, type]
+          properties:
+            id: { type: string }
+            type: { type: string, enum: [user, agent, system] }
+        input:
+          type: object
+          additionalProperties: true
+        result:
+          type: object
+          nullable: true
+          additionalProperties: true
+        terminalReason:
+          type: string
+          nullable: true
+    ToolResult:
+      type: object
+      required: [ok, durationMs, correlationId]
+      properties:
+        ok: { type: boolean }
+        result:
+          type: object
+          nullable: true
+          additionalProperties: true
+        error:
+          type: string
+          nullable: true
+        durationMs: { type: integer, minimum: 0 }
+        correlationId: { type: string }
+    AuditEntry:
+      type: object
+      required:
+        - id
+        - seq
+        - ts
+        - actor
+        - action
+        - resource
+        - data
+        - prevHash
+        - hash
+        - signedCheckpoint
+      properties:
+        id: { type: string }
+        seq: { type: integer, minimum: 0 }
+        ts: { type: string, format: date-time }
+        actor:
+          type: object
+          required: [id, type]
+          properties:
+            id: { type: string }
+            type: { type: string, enum: [agent, user, system] }
+        action: { type: string }
+        resource:
+          type: object
+          required: [kind, id]
+          properties:
+            kind: { type: string }
+            id: { type: string }
+        data:
+          type: object
+          additionalProperties: true
+        prevHash: { type: string, pattern: "^[0-9a-f]{64}$" }
+        hash: { type: string, pattern: "^[0-9a-f]{64}$" }
+        signedCheckpoint:
+          type: object
+          required: [algorithm, payload, signature]
+          properties:
+            algorithm: { type: string, enum: [ed25519-stub-v1] }
+            payload: { type: string }
+            signature: { type: string }
+    AgentCard:
+      $ref: "https://fagaos.dev/schemas/agent-card/v1.json"

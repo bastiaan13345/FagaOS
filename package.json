@@ -5,11 +5,13 @@
   "description": "FagaOS — capability-based agent operating system",
   "license": "UNLICENSED",
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "apps/*"
   ],
   "scripts": {
     "build": "npm run -ws --if-present build",
-    "lint": "eslint \"packages/*/src/**/*.ts\" \"packages/*/tests/**/*.ts\"",
+    "build:schema": "npm run -ws --if-present build:schema",
+    "lint": "eslint \"packages/*/src/**/*.ts\" \"packages/*/tests/**/*.ts\" \"apps/*/src/**/*.ts\" \"apps/*/tests/**/*.ts\"",
     "typecheck": "tsc -b",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -22,8 +24,10 @@
     "@typescript-eslint/parser": "^7.0.0",
     "@vitest/coverage-v8": "^1.6.0",
     "eslint": "^8.57.0",
+    "tsx": "^4.7.0",
     "typescript": "^5.4.0",
-    "vitest": "^1.6.0"
+    "vitest": "^1.6.0",
+    "zod": "^3.23.0"
   },
   "engines": {
     "node": ">=20.10.0"

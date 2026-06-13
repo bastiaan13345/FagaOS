@@ -1,0 +1,21 @@
+{
+  "name": "@fagaos/agent-manifest",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Typed AgentManifest / AgentCard schema. The runtime contract for declaring an agent's identity, capabilities, MCP endpoints, auth requirements, owner, and version. See docs/agent-card.md.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./schema.json": "./dist/agent-card.schema.json"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "build:schema": "tsx scripts/build-schema.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "zod": "^3.23.0"
+  }
+}
