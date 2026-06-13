@@ -1,0 +1,23 @@
+{
+  "name": "@fagaos/qa-harness",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Sandbox correctness harness, connector contract suite, and adversarial corpus for FagaOS QA.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./sandbox": "./dist/sandbox/index.js",
+    "./contracts": "./dist/contracts/index.js",
+    "./corpus": "./dist/corpus/index.js",
+    "./fixtures": "./dist/fixtures/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fagaos/connectors": "0.0.0"
+  }
+}
