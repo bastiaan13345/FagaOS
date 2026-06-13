@@ -1,0 +1,760 @@
+openapi: 3.0.3
+info:
+  title: FagaOS Connector Gateway API
+  version: 0.1.0
+  description: |
+    Phase 1 connector-gateway surface (FAG-11). The agent runtime calls
+    these endpoints to read accounts, mail, conversations, and
+    calendar events from any provider the user has linked.
+
+    Every call is `account_id`-scoped, capability-checked,
+    rate-budgeted, idempotency-keyed, and audited. The connector
+    implementations live in `packages/connectors/src/connectors/`;
+    this spec captures the wire shape only.
+
+    Phase 1 ships read-only on Gmail and Google Calendar (behind
+    feature flags) and stub fixtures for everything else. The same
+    surface is used by every connector — there is no per-provider
+    API path.
+  contact:
+    name: FagaOS Integrations Lead
+  license:
+    name: Proprietary
+servers:
+  - url: http://127.0.0.1:8080
+    description: Phase 1 local development
+
+tags:
+  - name: accounts
+    description: List and inspect linked accounts.
+  - name: mail
+    description: Email operations (list, get, send).
+  - name: dm
+    description: Direct-message operations (list conversations, send).
+  - name: calendar
+    description: Calendar operations (list calendars, list events, get event).
+  - name: webhooks
+    description: Pub/Sub push ingress for Gmail + Google Calendar.
+
+paths:
+  /v1/accounts:
+    get:
+      tags: [accounts]
+      summary: List accounts the caller can act on.
+      parameters:
+        - in: query
+          name: provider
+          schema:
+            $ref: "#/components/schemas/Provider"
+          required: false
+      responses:
+        "200":
+          description: Accounts the caller can act on.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accounts]
+                properties:
+                  accounts:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Account"
+
+  /v1/mail/list:
+    post:
+      tags: [mail]
+      summary: List messages on an account.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MailListRequest"
+      responses:
+        "200":
+          description: A page of messages.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MailListResponse"
+        "400": { $ref: "#/components/responses/InvalidInput" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/IdempotencyConflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /v1/mail/get:
+    post:
+      tags: [mail]
+      summary: Get a single message by id.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MailGetRequest"
+      responses:
+        "200":
+          description: The message.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MailGetResponse"
+        "400": { $ref: "#/components/responses/InvalidInput" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /v1/mail/send:
+    post:
+      tags: [mail]
+      summary: Send a mail message. Read-only mode in Phase 1.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MailSendRequest"
+      responses:
+        "200":
+          description: The sent message.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MailSendResponse"
+        "400": { $ref: "#/components/responses/InvalidInput" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /v1/dm/conversations/list:
+    post:
+      tags: [dm]
+      summary: List messaging conversations.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DmListRequest"
+      responses:
+        "200":
+          description: A page of conversations.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DmListResponse"
+        "400": { $ref: "#/components/responses/InvalidInput" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/dm/send:
+    post:
+      tags: [dm]
+      summary: Send a direct message.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DmSendRequest"
+      responses:
+        "200":
+          description: The sent message.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DmSendResponse"
+        "400": { $ref: "#/components/responses/InvalidInput" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/calendar/calendars/list:
+    post:
+      tags: [calendar]
+      summary: List calendars on the account.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CalendarsListRequest"
+      responses:
+        "200":
+          description: Calendars on the account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CalendarsListResponse"
+        "400": { $ref: "#/components/responses/InvalidInput" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/calendar/events/list:
+    post:
+      tags: [calendar]
+      summary: List events on a calendar.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EventsListRequest"
+      responses:
+        "200":
+          description: A page of events.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventsListResponse"
+        "400": { $ref: "#/components/responses/InvalidInput" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "410":
+          description: Sync token expired; the caller must clear the stored token and re-sync.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectorError"
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ProviderUnavailable" }
+
+  /v1/webhooks/gmail:
+    post:
+      tags: [webhooks]
+      summary: Pub/Sub push for Gmail history notifications.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PubSubEnvelope"
+      responses:
+        "200":
+          description: Notification accepted; the gateway will run a `users.history.list` backfill.
+        "400": { $ref: "#/components/responses/InvalidInput" }
+        "401": { $ref: "#/components/responses/WebhookSignatureInvalid" }
+
+  /v1/webhooks/google_calendar:
+    post:
+      tags: [webhooks]
+      summary: Pub/Sub push for Google Calendar `events.watch` notifications.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PubSubEnvelope"
+      responses:
+        "200":
+          description: Notification accepted.
+        "400": { $ref: "#/components/responses/InvalidInput" }
+        "401": { $ref: "#/components/responses/WebhookSignatureInvalid" }
+
+components:
+  responses:
+    InvalidInput:
+      description: The request body failed validation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ConnectorError"
+    Unauthorized:
+      description: The provider rejected the access token, or the webhook signature check failed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ConnectorError"
+    Forbidden:
+      description: The token does not authorise the call, or the account is paused / revoked.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ConnectorError"
+    NotFound:
+      description: The account or the target resource does not exist.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ConnectorError"
+    IdempotencyConflict:
+      description: The idempotency key was previously used with a different request body.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ConnectorError"
+    RateLimited:
+      description: The per-account rate budget is exhausted; the response includes `retry_after_ms`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ConnectorError"
+    ProviderUnavailable:
+      description: The provider returned a non-2xx response or the network call failed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ConnectorError"
+    WebhookSignatureInvalid:
+      description: The webhook authorisation check failed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ConnectorError"
+
+  schemas:
+    Provider:
+      type: string
+      enum:
+        - gmail
+        - outlook
+        - imap
+        - icloud
+        - whatsapp
+        - instagram
+        - telegram
+        - discord
+        - slack
+        - google_calendar
+        - outlook_calendar
+        - caldav
+
+    AccountStatus:
+      type: string
+      enum: [active, reauth_required, revoked, paused]
+
+    Capability:
+      type: object
+      required: [provider, operation]
+      properties:
+        provider: { $ref: "#/components/schemas/Provider" }
+        operation: { type: string }
+        account_id:
+          type: string
+          nullable: true
+          description: Specific account id, or `null` for a provider-wide grant.
+
+    CapabilityToken:
+      type: object
+      required: [subject, capabilities, expires_at]
+      properties:
+        subject: { type: string }
+        capabilities:
+          type: array
+          items: { $ref: "#/components/schemas/Capability" }
+        expires_at:
+          type: string
+          format: date-time
+
+    Account:
+      type: object
+      required: [id, user_id, provider, handle, status, created_at, updated_at]
+      properties:
+        id: { type: string }
+        user_id: { type: string }
+        provider: { $ref: "#/components/schemas/Provider" }
+        handle: { type: string, description: "Redacted handle, e.g. `j***@gmail.com`." }
+        scopes:
+          type: array
+          items: { type: string }
+        capabilities:
+          type: array
+          items:
+            type: string
+            enum: [read_mail, send_mail, modify_mail, list_events, create_event, send_dm, list_conversations]
+        status: { $ref: "#/components/schemas/AccountStatus" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Contact:
+      type: object
+      required: [address]
+      properties:
+        address: { type: string }
+        name: { type: string }
+        avatar_url: { type: string, format: uri }
+
+    ProviderRef:
+      type: object
+      required: [provider, native_id]
+      properties:
+        provider: { $ref: "#/components/schemas/Provider" }
+        native_id: { type: string }
+        etag: { type: string }
+        cursor: { type: string }
+
+    Attachment:
+      type: object
+      required: [id, filename, mime_type, size_bytes]
+      properties:
+        id: { type: string }
+        filename: { type: string }
+        mime_type: { type: string }
+        size_bytes:
+          type: integer
+          format: int64
+        content_hash:
+          type: string
+          description: SHA-256 hex digest of the file contents.
+        disposition:
+          type: string
+          enum: [attachment, inline]
+          default: attachment
+        content_id: { type: string }
+
+    Message:
+      type: object
+      required: [id, account_id, thread_id, direction, from, to, preview, body_text, status_flags, received_at, provider_ref]
+      properties:
+        id: { type: string }
+        account_id: { type: string }
+        thread_id:
+          type: string
+          nullable: true
+        direction:
+          type: string
+          enum: [in, out]
+        from: { $ref: "#/components/schemas/Contact" }
+        to:
+          type: array
+          items: { $ref: "#/components/schemas/Contact" }
+        cc:
+          type: array
+          items: { $ref: "#/components/schemas/Contact" }
+        subject: { type: string }
+        preview:
+          type: string
+          maxLength: 280
+        body_text: { type: string }
+        body_html: { type: string }
+        attachments:
+          type: array
+          items: { $ref: "#/components/schemas/Attachment" }
+        labels:
+          type: array
+          items: { type: string }
+        folder: { type: string }
+        status_flags:
+          type: object
+          required: [read]
+          properties:
+            read: { type: boolean }
+            starred: { type: boolean }
+        received_at: { type: string, format: date-time }
+        sent_at: { type: string, format: date-time }
+        provider_ref: { $ref: "#/components/schemas/ProviderRef" }
+
+    Conversation:
+      type: object
+      required: [id, account_id, channel, participants, last_message_at, unread_count, provider_ref]
+      properties:
+        id: { type: string }
+        account_id: { type: string }
+        channel:
+          type: string
+          enum: [sms, whatsapp, instagram, telegram, discord, slack]
+        participants:
+          type: array
+          items: { $ref: "#/components/schemas/Contact" }
+        last_message_at: { type: string, format: date-time }
+        unread_count: { type: integer, minimum: 0 }
+        window_open_until: { type: string, format: date-time }
+        preview:
+          type: string
+          maxLength: 280
+        provider_ref: { $ref: "#/components/schemas/ProviderRef" }
+
+    Calendar:
+      type: object
+      required: [id, account_id, name, primary, read_only, provider_ref]
+      properties:
+        id: { type: string }
+        account_id: { type: string }
+        name: { type: string }
+        primary: { type: boolean }
+        color:
+          type: string
+          pattern: "^#[0-9a-fA-F]{6}$"
+        read_only: { type: boolean }
+        provider_ref: { $ref: "#/components/schemas/ProviderRef" }
+
+    Attendee:
+      type: object
+      required: [contact, status, optional]
+      properties:
+        contact: { $ref: "#/components/schemas/Contact" }
+        status:
+          type: string
+          enum: [accepted, declined, tentative, needsAction]
+        optional: { type: boolean }
+
+    EventTime:
+      type: object
+      required: [tz, at]
+      properties:
+        tz:
+          type: string
+          description: IANA tzid, e.g. `America/Los_Angeles`.
+        at:
+          type: string
+          format: date-time
+          description: RFC 3339 timestamp.
+
+    Conference:
+      type: object
+      required: [provider]
+      properties:
+        provider:
+          type: string
+          enum: [google_meet, teams, other]
+        join_url: { type: string, format: uri }
+
+    Recurrence:
+      type: object
+      required: [rrule]
+      properties:
+        rrule: { type: string }
+        exdates:
+          type: array
+          items: { type: string, format: date-time }
+        overrides:
+          type: array
+          items: { $ref: "#/components/schemas/Event" }
+
+    Event:
+      type: object
+      required: [id, account_id, calendar_id, title, start, end, all_day, status, provider_ref]
+      properties:
+        id: { type: string }
+        account_id: { type: string }
+        calendar_id: { type: string }
+        title: { type: string }
+        description: { type: string }
+        start: { $ref: "#/components/schemas/EventTime" }
+        end: { $ref: "#/components/schemas/EventTime" }
+        all_day: { type: boolean }
+        recurrence: { $ref: "#/components/schemas/Recurrence" }
+        attendees:
+          type: array
+          items: { $ref: "#/components/schemas/Attendee" }
+        conference: { $ref: "#/components/schemas/Conference" }
+        status:
+          type: string
+          enum: [confirmed, tentative, cancelled]
+        provider_ref: { $ref: "#/components/schemas/ProviderRef" }
+
+    ConnectorError:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - invalid_input
+            - unauthorized
+            - forbidden
+            - not_found
+            - rate_limited
+            - provider_error
+            - provider_unavailable
+            - webhook_signature_invalid
+            - webhook_payload_invalid
+            - reauth_required
+            - idempotency_conflict
+            - feature_disabled
+            - internal
+        message: { type: string }
+        retry_after_ms: { type: integer, format: int64 }
+
+    PubSubEnvelope:
+      type: object
+      required: [message, subscription]
+      properties:
+        message:
+          type: object
+          required: [data, messageId]
+          properties:
+            data:
+              type: string
+              description: Base64-encoded JSON payload.
+            messageId: { type: string }
+        subscription: { type: string }
+
+    # ---- Per-operation request/response envelopes ----
+    MailListRequest:
+      type: object
+      required: [token, account_id, args]
+      properties:
+        token: { $ref: "#/components/schemas/CapabilityToken" }
+        account_id: { type: string }
+        args:
+          type: object
+          properties:
+            query: { type: string, default: "in:inbox" }
+            limit: { type: integer, minimum: 1, maximum: 100, default: 20 }
+            page_token: { type: string, nullable: true }
+        idempotency_key: { type: string }
+        trace_id: { type: string }
+
+    MailListResponse:
+      type: object
+      required: [messages, next_page_token]
+      properties:
+        messages:
+          type: array
+          items: { $ref: "#/components/schemas/Message" }
+        next_page_token:
+          type: string
+          nullable: true
+
+    MailGetRequest:
+      type: object
+      required: [token, account_id, args]
+      properties:
+        token: { $ref: "#/components/schemas/CapabilityToken" }
+        account_id: { type: string }
+        args:
+          type: object
+          required: [message_id]
+          properties:
+            message_id: { type: string }
+        idempotency_key: { type: string }
+        trace_id: { type: string }
+
+    MailGetResponse:
+      type: object
+      required: [message]
+      properties:
+        message: { $ref: "#/components/schemas/Message" }
+
+    MailSendRequest:
+      type: object
+      required: [token, account_id, args]
+      properties:
+        token: { $ref: "#/components/schemas/CapabilityToken" }
+        account_id: { type: string }
+        args:
+          type: object
+          required: [to, subject, body]
+          properties:
+            to:
+              type: array
+              items: { type: string, format: email }
+            subject: { type: string }
+            body: { type: string }
+            thread_id: { type: string, nullable: true }
+        idempotency_key: { type: string }
+        trace_id: { type: string }
+
+    MailSendResponse:
+      type: object
+      required: [provider_message_id]
+      properties:
+        provider_message_id: { type: string }
+        thread_id:
+          type: string
+          nullable: true
+
+    DmListRequest:
+      type: object
+      required: [token, account_id, args]
+      properties:
+        token: { $ref: "#/components/schemas/CapabilityToken" }
+        account_id: { type: string }
+        args:
+          type: object
+          properties:
+            channel:
+              type: string
+              enum: [sms, whatsapp, instagram, telegram, discord, slack]
+            limit: { type: integer, minimum: 1, maximum: 100 }
+        idempotency_key: { type: string }
+        trace_id: { type: string }
+
+    DmListResponse:
+      type: object
+      required: [conversations, next_page_token]
+      properties:
+        conversations:
+          type: array
+          items: { $ref: "#/components/schemas/Conversation" }
+        next_page_token:
+          type: string
+          nullable: true
+
+    DmSendRequest:
+      type: object
+      required: [token, account_id, args]
+      properties:
+        token: { $ref: "#/components/schemas/CapabilityToken" }
+        account_id: { type: string }
+        args:
+          type: object
+          required: [conversation_id, body]
+          properties:
+            conversation_id: { type: string }
+            body: { type: string }
+        idempotency_key: { type: string }
+        trace_id: { type: string }
+
+    DmSendResponse:
+      type: object
+      required: [provider_message_id]
+      properties:
+        provider_message_id: { type: string }
+
+    CalendarsListRequest:
+      type: object
+      required: [token, account_id]
+      properties:
+        token: { $ref: "#/components/schemas/CapabilityToken" }
+        account_id: { type: string }
+        idempotency_key: { type: string }
+        trace_id: { type: string }
+
+    CalendarsListResponse:
+      type: object
+      required: [calendars]
+      properties:
+        calendars:
+          type: array
+          items: { $ref: "#/components/schemas/Calendar" }
+
+    EventsListRequest:
+      type: object
+      required: [token, account_id, args]
+      properties:
+        token: { $ref: "#/components/schemas/CapabilityToken" }
+        account_id: { type: string }
+        args:
+          type: object
+          properties:
+            calendar_id: { type: string, default: primary }
+            time_min: { type: string, format: date-time }
+            time_max: { type: string, format: date-time }
+            limit: { type: integer, minimum: 1, maximum: 250 }
+            sync_token: { type: string, nullable: true }
+        idempotency_key: { type: string }
+        trace_id: { type: string }
+
+    EventsListResponse:
+      type: object
+      required: [events]
+      properties:
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/Event" }
+        next_sync_token:
+          type: string
+          nullable: true

@@ -1,43 +1,31 @@
 /**
- * @fagaos/connectors — interface contracts for external integrations.
+ * @fagaos/connectors — connector gateway for email, messaging, and calendar.
  *
- * Per FAG-8 scope: interface only. Concrete implementations (Gmail,
- * WhatsApp, Google Calendar, etc.) land under separate FAG-5 issues and
- * are deliberately out of scope here.
+ * Phase 1 (FAG-11) ships the connector skeleton: the normalised model,
+ * the gateway surface (`ConnectorGateway`), stub connectors, and the
+ * first two real read-only connectors (Gmail + Google Calendar) behind
+ * feature flags.
  *
- * Every connector must:
- *   - require a signed capability token for every call
- *   - emit an audit log entry per call (allow, deny, error)
- *   - be idempotent at the operation level
- *   - respect rate limits and back off
+ * The package is the seam between the FagaOS agent runtime and the
+ * outside world. The runtime only ever sees the normalised shapes in
+ * `models/`, the capability check in `capability.ts`, and the gateway
+ * surface in `gateway/`. Concrete provider details (OAuth flows,
+ * Pub/Sub payloads, XOAUTH2 SASL, etc.) are confined to `connectors/`.
+ *
+ * See `docs/connectors.md` for the architecture and the OpenAPI spec
+ * for the wire shape.
  */
+export * from './models/index.js';
+export * from './errors.js';
+export * from './capability.js';
+export * from './connector.js';
+export * from './store/index.js';
+export * from './features/index.js';
+export * from './oauth/index.js';
+export * from './webhooks/index.js';
+export * from './gateway/index.js';
+export * from './connectors/index.js';
 
-export interface ConnectorCapability {
-  /** Resource type, e.g. "connector.gmail". */
-  type: string;
-  /** Operation, e.g. "send", "list", "search". */
-  operation: string;
-}
-
-export interface ConnectorRequest {
-  capability: ConnectorCapability;
-  args: Record<string, unknown>;
-}
-
-export interface ConnectorResponse<T = unknown> {
-  ok: boolean;
-  data?: T;
-  error?: { code: string; message: string };
-  /** Echoed for idempotency: same request id never re-executes. */
-  idempotencyKey: string;
-}
-
-export interface Connector {
-  readonly id: string;
-  /** Verify a capability token covers this call. */
-  authorize(capability: ConnectorCapability): boolean;
-  invoke<T = unknown>(request: ConnectorRequest): Promise<ConnectorResponse<T>>;
-}
-
+/** Phase 0 contract surface retained for compatibility. */
 export const CONNECTORS_NOT_IMPLEMENTED =
-  'Connector implementations (Gmail, WhatsApp, Calendar, …) land in FAG-5 follow-ups. Phase 0 ships the contract only.';
+  'Concrete connector implementations ship in FAG-11 follow-ups (Outlook, IMAP, WhatsApp, Instagram, Telegram, Discord, Slack, iCloud, CalDAV).';
