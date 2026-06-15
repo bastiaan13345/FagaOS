@@ -32,16 +32,20 @@ implementation:
   the hook is enforced before browser adapter dispatch.
 - `DesktopRuntimeAdapter` isolates screenshot, mouse, keyboard, and clipboard
   operations. If no adapter is supplied, deterministic local behavior remains
-  available for tests.
+  available in test mode only; production mode fails closed unless runtime
+  adapter support is explicitly configured for the requested operation.
 - `BrowserAdapter` isolates browser profile lifecycle, navigation, inspection,
-  and streaming hooks behind the bridge.
+  and streaming hooks behind the bridge. Production mode requires an explicit
+  browser adapter instead of using the deterministic stub.
 - `RemoteWorkerProvisioner` is the lifecycle seam for a future scheduler or
   worker pool. It can provision and release a lease per session, but the bridge
   does not autoscale workers itself.
 
   `StubBrowserAdapter` returns deterministic navigation results and is the
   default for local tests. `ChromeDevToolsBrowserAdapter` is the CDP-shaped
-  skeleton for future real browser workers.
+  skeleton for future real browser workers. Construct `LocalDesktopBridge` with
+  `mode: 'production'` for production wiring so missing adapters fail at
+  configuration or operation time instead of returning fake-success results.
 
 ## Session Boundary
 
@@ -55,9 +59,12 @@ Each bridge session creates a private directory under the configured
 ```
 
 Callers only receive the profile and drop-folder paths for inspection and local
-testing. Bridge file operations resolve paths under `drop/` and reject traversal
-outside that folder. Termination and timeout cleanup remove the full
-per-session directory.
+testing. Bridge file operations resolve paths under `drop/`, reject lexical
+traversal, validate real paths for existing files and parent directories, and
+open files with no-follow flags so symlink escapes are not treated as valid file
+exchange. Termination and timeout cleanup remove the full per-session directory.
+Cleanup is best-effort across browser teardown, desktop termination, worker
+release, and directory removal: one failing step does not skip the rest.
 
 Runtime adapters must still run under the FAG-4 isolation model: separate OS
 user or equivalent worker identity, constrained desktop session, portal or
@@ -68,9 +75,11 @@ adapter or worker supervisor's job.
 ## Capabilities and Audit
 
 Every bridge action passes through `CapabilityVerifier` before touching session
-state or adapters. `auditCorrelationId` is forwarded to capability resource
-context and audit payloads so FAG-21 tool invocation records can correlate with
-FAG-13 policy decisions and bridge runtime events.
+state or adapters. Operation-specific resource context is forwarded before
+dispatch, including coordinates, clipboard/text lengths, requested browser URL
+components, drop-file relative paths, and `auditCorrelationId`. That gives
+FAG-13 policy code enough context to deny specific resources before network
+checks or adapter calls run.
 
 Denials are recorded in the append-only audit log with a `deny` outcome and then
 surfaced as `CapabilityDeniedError`.

@@ -56,6 +56,84 @@ describe('LocalDesktopBridge session lifecycle', () => {
       'desktopBridge.session.inspect',
     ]);
   });
+
+  it('cleans up provisioned resources when adapter session creation fails', async () => {
+    const root = await makeRoot();
+    const released: string[] = [];
+    const provisioner: RemoteWorkerProvisioner = {
+      provision: async ({ session }) => ({
+        id: `worker-${session.id}`,
+        target: 'linux-x11-cdp',
+      }),
+      release: async ({ session, worker }) => {
+        released.push(`${worker.id}:${session.id}`);
+      },
+    };
+    const bridge = new LocalDesktopBridge({
+      auditLog: new InMemoryAuditLog(),
+      actor,
+      capabilityVerifier: createAllowListCapabilityVerifier(['session.create']),
+      sandboxRoot: root,
+      remoteWorkerProvisioner: provisioner,
+      desktopAdapter: {
+        createSession: async () => {
+          throw new Error('desktop launch failed');
+        },
+      },
+    });
+
+    await expect(bridge.createSession({ appId: 'browser' })).rejects.toThrow('desktop launch failed');
+
+    expect(released).toHaveLength(1);
+    await expect(fs.readdir(root)).resolves.toEqual([]);
+  });
+
+  it('runs every cleanup step before surfacing teardown failures', async () => {
+    const calls: string[] = [];
+    const provisioner: RemoteWorkerProvisioner = {
+      provision: async ({ session }) => ({
+        id: `worker-${session.id}`,
+        target: 'linux-x11-cdp',
+      }),
+      release: async ({ session, worker }) => {
+        calls.push(`release:${worker.id}:${session.id}`);
+      },
+    };
+    const bridge = new LocalDesktopBridge({
+      auditLog: new InMemoryAuditLog(),
+      actor,
+      capabilityVerifier: createAllowListCapabilityVerifier([
+        'session.create',
+        'session.terminate',
+        'session.inspect',
+      ]),
+      sandboxRoot: await makeRoot(),
+      remoteWorkerProvisioner: provisioner,
+      browserAdapter: {
+        navigate: async ({ url }) => ({ ok: true, url, title: 'runtime browser' }),
+        teardownSession: async ({ session }) => {
+          calls.push(`browser-teardown:${session.id}`);
+          throw new Error('browser teardown failed');
+        },
+      },
+      desktopAdapter: {
+        terminateSession: async ({ session }) => {
+          calls.push(`desktop-terminate:${session.id}`);
+        },
+      },
+    });
+    const session = await bridge.createSession({ appId: 'browser' });
+
+    await expect(bridge.terminateSession(session.id)).rejects.toThrow('cleanup failed');
+
+    expect(calls).toEqual([
+      `browser-teardown:${session.id}`,
+      `desktop-terminate:${session.id}`,
+      `release:worker-${session.id}:${session.id}`,
+    ]);
+    await expect(fs.stat(session.profileDir)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(bridge.inspectSession(session.id)).resolves.toMatchObject({ status: 'terminated' });
+  });
 });
 
 describe('LocalDesktopBridge capability and audit behavior', () => {
@@ -96,6 +174,104 @@ describe('LocalDesktopBridge capability and audit behavior', () => {
     expect(screenshot?.action.outcome).toBe('ok');
     expect(screenshot?.resource).toEqual({ type: 'desktopBridge.session', id: session.id });
     expect(screenshot?.payload).toMatchObject({ appId: 'browser' });
+  });
+
+  it('passes operation-specific resource context to capability checks before dispatch', async () => {
+    const seenResources: Array<{ operation: string; resource: Record<string, unknown> | undefined }> = [];
+    const browserAdapter: BrowserAdapter = {
+      navigate: async ({ url }) => ({ ok: true, url, title: 'runtime browser' }),
+    };
+    const bridge = new LocalDesktopBridge({
+      auditLog: new InMemoryAuditLog(),
+      actor,
+      browserAdapter,
+      capabilityVerifier: (request) => {
+        seenResources.push({ operation: request.operation, resource: request.resource });
+        return { allow: true };
+      },
+      networkPolicy: ({ url }) => ({ allow: url.hostname === 'example.com' }),
+      sandboxRoot: await makeRoot(),
+    });
+    const session = await bridge.createSession({ appId: 'browser', auditCorrelationId: 'corr-create' });
+
+    await bridge.clickMouse({ sessionId: session.id, x: 12, y: 34, button: 'right', auditCorrelationId: 'corr-click' });
+    await bridge.writeClipboard({ sessionId: session.id, text: 'copy text', auditCorrelationId: 'corr-clip-write' });
+    await bridge.navigateBrowser({ sessionId: session.id, url: 'https://example.com/path', auditCorrelationId: 'corr-nav' });
+    await bridge.writeDropFile({
+      sessionId: session.id,
+      relativePath: 'out/result.txt',
+      contents: 'file text',
+      auditCorrelationId: 'corr-drop-write',
+    });
+
+    expect(seenResources).toEqual(expect.arrayContaining([
+      {
+        operation: 'mouse.click',
+        resource: {
+          auditCorrelationId: 'corr-click',
+          x: 12,
+          y: 34,
+          button: 'right',
+        },
+      },
+      {
+        operation: 'clipboard.write',
+        resource: {
+          auditCorrelationId: 'corr-clip-write',
+          textLength: 9,
+        },
+      },
+      {
+        operation: 'browser.navigate',
+        resource: {
+          auditCorrelationId: 'corr-nav',
+          url: 'https://example.com/path',
+          origin: 'https://example.com',
+          protocol: 'https:',
+          hostname: 'example.com',
+        },
+      },
+      {
+        operation: 'file.writeDrop',
+        resource: {
+          auditCorrelationId: 'corr-drop-write',
+          relativePath: 'out/result.txt',
+          contentsLength: 9,
+        },
+      },
+    ]));
+  });
+
+  it('lets capability policy deny navigation by requested URL before network dispatch', async () => {
+    let networkChecks = 0;
+    let adapterCalls = 0;
+    const bridge = new LocalDesktopBridge({
+      auditLog: new InMemoryAuditLog(),
+      actor,
+      browserAdapter: {
+        navigate: async ({ url }) => {
+          adapterCalls += 1;
+          return { ok: true, url, title: 'runtime browser' };
+        },
+      },
+      capabilityVerifier: (request) => (
+        request.operation === 'browser.navigate' && request.resource?.hostname === 'blocked.example'
+          ? { allow: false, reason: 'blocked_host' }
+          : { allow: true }
+      ),
+      networkPolicy: () => {
+        networkChecks += 1;
+        return { allow: true };
+      },
+      sandboxRoot: await makeRoot(),
+    });
+    const session = await bridge.createSession({ appId: 'browser' });
+
+    await expect(bridge.navigateBrowser({ sessionId: session.id, url: 'https://blocked.example/path' }))
+      .rejects.toBeInstanceOf(CapabilityDeniedError);
+
+    expect(networkChecks).toBe(0);
+    expect(adapterCalls).toBe(0);
   });
 });
 
@@ -217,6 +393,37 @@ describe('LocalDesktopBridge sandbox boundaries', () => {
     ).rejects.toThrow('drop folder paths must stay inside the drop folder');
   });
 
+  it('rejects drop file reads through symlinks that resolve outside the drop folder', async () => {
+    const bridge = await makeBridge([
+      'session.create',
+      'file.readDrop',
+    ]);
+    const session = await bridge.createSession({ appId: 'browser' });
+    const outside = join(await makeRoot(), 'secret.txt');
+    await fs.writeFile(outside, 'secret', 'utf8');
+    await fs.symlink(outside, join(session.dropDir, 'linked-secret.txt'));
+
+    await expect(
+      bridge.readDropFile({ sessionId: session.id, relativePath: 'linked-secret.txt' }),
+    ).rejects.toThrow('drop folder paths must stay inside the drop folder');
+  });
+
+  it('rejects drop file writes through symlinks without modifying the target', async () => {
+    const bridge = await makeBridge([
+      'session.create',
+      'file.writeDrop',
+    ]);
+    const session = await bridge.createSession({ appId: 'browser' });
+    const outside = join(await makeRoot(), 'secret.txt');
+    await fs.writeFile(outside, 'original', 'utf8');
+    await fs.symlink(outside, join(session.dropDir, 'linked-secret.txt'));
+
+    await expect(
+      bridge.writeDropFile({ sessionId: session.id, relativePath: 'linked-secret.txt', contents: 'changed' }),
+    ).rejects.toThrow('drop folder paths must stay inside the drop folder');
+    await expect(fs.readFile(outside, 'utf8')).resolves.toBe('original');
+  });
+
   it('rejects browser navigation when the network policy denies the URL', async () => {
     const bridge = await makeBridge([
       'session.create',
@@ -241,6 +448,35 @@ describe('LocalDesktopBridge sandbox boundaries', () => {
 });
 
 describe('LocalDesktopBridge production runtime seams', () => {
+  it('requires explicit runtime adapters in production mode', async () => {
+    expect(() => new LocalDesktopBridge({
+      auditLog: new InMemoryAuditLog(),
+      actor,
+      capabilityVerifier: createAllowListCapabilityVerifier(['session.create']),
+      sandboxRoot: '/tmp/fagaos-production-test',
+      mode: 'production',
+    })).toThrow('production mode requires an explicit browserAdapter');
+  });
+
+  it('does not fall back to deterministic desktop results in production mode', async () => {
+    const bridge = new LocalDesktopBridge({
+      auditLog: new InMemoryAuditLog(),
+      actor,
+      capabilityVerifier: createAllowListCapabilityVerifier(['session.create', 'screenshot.capture']),
+      sandboxRoot: await makeRoot(),
+      mode: 'production',
+      browserAdapter: {
+        navigate: async ({ url }) => ({ ok: true, url, title: 'runtime browser' }),
+      },
+      desktopAdapter: {},
+    });
+    const session = await bridge.createSession({ appId: 'browser' });
+
+    await expect(bridge.captureScreenshot({ sessionId: session.id })).rejects.toThrow(
+      'production mode requires desktop adapter support for screenshot.capture',
+    );
+  });
+
   it('dispatches desktop operations through an injected runtime adapter and audits correlation ids', async () => {
     const auditLog = new InMemoryAuditLog();
     const calls: string[] = [];

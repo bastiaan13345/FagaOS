@@ -1,7 +1,8 @@
 import { Buffer } from 'node:buffer';
-import { promises as fs } from 'node:fs';
+import { constants, promises as fs } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve, relative } from 'node:path';
+import { dirname, join, resolve, relative } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { CoreAuditActor, CoreAuditLog } from '@fagaos/audit-log';
 
@@ -170,6 +171,7 @@ export interface LocalDesktopBridgeOptions {
   auditLog: CoreAuditLog;
   actor: CoreAuditActor;
   capabilityVerifier: CapabilityVerifier;
+  mode?: 'test' | 'production';
   sandboxRoot?: string;
   networkPolicy?: NetworkPolicy;
   browserAdapter?: BrowserAdapter;
@@ -184,6 +186,16 @@ interface SessionRecord {
   worker?: RemoteWorkerLease;
   clipboard: string;
   timer: ReturnType<typeof setTimeout>;
+}
+
+interface OperationResourceInput extends BridgeOperationOptions {
+  x?: number;
+  y?: number;
+  button?: MouseButton;
+  text?: string;
+  contents?: string;
+  relativePath?: string;
+  url?: URL;
 }
 
 export interface HostCommand {
@@ -233,6 +245,15 @@ export class ValidationError extends DesktopBridgeError {
 export class NetworkDeniedError extends DesktopBridgeError {
   constructor(message: string) {
     super(message, 'NETWORK_DENIED');
+  }
+}
+
+export class CleanupError extends DesktopBridgeError {
+  constructor(readonly failures: Error[]) {
+    super(
+      `cleanup failed: ${failures.map((failure) => failure.message).join('; ')}`,
+      'CLEANUP_FAILED',
+    );
   }
 }
 
@@ -294,6 +315,7 @@ export class LocalDesktopBridge implements DesktopBridge {
   private readonly networkPolicy: NetworkPolicy;
   private readonly browserAdapter: BrowserAdapter;
   private readonly desktopAdapter: DesktopRuntimeAdapter;
+  private readonly mode: 'test' | 'production';
   private readonly remoteWorkerProvisioner: RemoteWorkerProvisioner | undefined;
   private readonly sandboxRoot: string;
   private readonly defaultTimeoutMs: number;
@@ -304,7 +326,11 @@ export class LocalDesktopBridge implements DesktopBridge {
     this.auditLog = options.auditLog;
     this.actor = options.actor;
     this.capabilityVerifier = options.capabilityVerifier;
+    this.mode = options.mode ?? 'test';
     this.networkPolicy = options.networkPolicy ?? denyAllNetworkPolicy;
+    if (this.mode === 'production' && !options.browserAdapter) {
+      throw new ValidationError('production mode requires an explicit browserAdapter');
+    }
     this.browserAdapter = options.browserAdapter ?? new StubBrowserAdapter();
     this.desktopAdapter = options.desktopAdapter ?? {};
     this.remoteWorkerProvisioner = options.remoteWorkerProvisioner;
@@ -334,9 +360,15 @@ export class LocalDesktopBridge implements DesktopBridge {
       createdAt,
       expiresAt: createdAt + timeoutMs,
     };
-    const worker = await this.remoteWorkerProvisioner?.provision({ session: copySession(session) });
-    await this.desktopAdapter.createSession?.(sessionContext(session, worker));
-    await this.browserAdapter.createSession?.(sessionContext(session, worker));
+    let worker: RemoteWorkerLease | undefined;
+    try {
+      worker = await this.remoteWorkerProvisioner?.provision({ session: copySession(session) });
+      await this.desktopAdapter.createSession?.(sessionContext(session, worker));
+      await this.browserAdapter.createSession?.(sessionContext(session, worker));
+    } catch (error) {
+      await this.cleanupUnrecordedSession(session, worker);
+      throw error;
+    }
     const timer = setTimeout(() => {
       void this.timeoutSession(id);
     }, timeoutMs);
@@ -382,7 +414,8 @@ export class LocalDesktopBridge implements DesktopBridge {
 
   async captureScreenshot(input: { sessionId: string } & BridgeOperationOptions): Promise<ScreenshotResult> {
     const record = await this.requireActiveRecord(input.sessionId, 'screenshot.capture', operationResource(input));
-    const result = await this.desktopAdapter.captureScreenshot?.({
+    const captureScreenshot = this.requireDesktopAdapterMethod('captureScreenshot', 'screenshot.capture');
+    const result = await captureScreenshot?.({
       session: copySession(record.session),
       ...(record.worker ? { worker: record.worker } : {}),
     }) ?? {
@@ -400,14 +433,18 @@ export class LocalDesktopBridge implements DesktopBridge {
   }
 
   async clickMouse(input: { sessionId: string; x: number; y: number; button?: MouseButton } & BridgeOperationOptions): Promise<CommandResult> {
-    const record = await this.requireActiveRecord(input.sessionId, 'mouse.click', operationResource(input));
     assertNonNegativeInteger(input.x, 'x');
     assertNonNegativeInteger(input.y, 'y');
     const button = input.button ?? 'left';
     if (!['left', 'middle', 'right'].includes(button)) {
       throw new ValidationError('button must be left, middle, or right');
     }
-    const result = await this.desktopAdapter.clickMouse?.({
+    const record = await this.requireActiveRecord(input.sessionId, 'mouse.click', operationResource({
+      ...input,
+      button,
+    }));
+    const clickMouse = this.requireDesktopAdapterMethod('clickMouse', 'mouse.click');
+    const result = await clickMouse?.({
       session: copySession(record.session),
       ...(record.worker ? { worker: record.worker } : {}),
       x: input.x,
@@ -425,9 +462,10 @@ export class LocalDesktopBridge implements DesktopBridge {
   }
 
   async typeKeyboard(input: { sessionId: string; text: string } & BridgeOperationOptions): Promise<CommandResult> {
-    const record = await this.requireActiveRecord(input.sessionId, 'keyboard.type', operationResource(input));
     requireNonEmpty(input.text, 'text');
-    const result = await this.desktopAdapter.typeKeyboard?.({
+    const record = await this.requireActiveRecord(input.sessionId, 'keyboard.type', operationResource(input));
+    const typeKeyboard = this.requireDesktopAdapterMethod('typeKeyboard', 'keyboard.type');
+    const result = await typeKeyboard?.({
       session: copySession(record.session),
       ...(record.worker ? { worker: record.worker } : {}),
       text: input.text,
@@ -442,7 +480,8 @@ export class LocalDesktopBridge implements DesktopBridge {
 
   async readClipboard(input: { sessionId: string } & BridgeOperationOptions): Promise<{ text: string }> {
     const record = await this.requireActiveRecord(input.sessionId, 'clipboard.read', operationResource(input));
-    const result = await this.desktopAdapter.readClipboard?.(sessionContext(record.session, record.worker)) ?? { text: record.clipboard };
+    const readClipboard = this.requireDesktopAdapterMethod('readClipboard', 'clipboard.read');
+    const result = await readClipboard?.(sessionContext(record.session, record.worker)) ?? { text: record.clipboard };
     await this.audit('clipboard.read', 'ok', record.session, {
       length: result.text.length,
       adapter: this.desktopAdapter.readClipboard ? 'runtime' : 'deterministic',
@@ -454,7 +493,8 @@ export class LocalDesktopBridge implements DesktopBridge {
   async writeClipboard(input: { sessionId: string; text: string } & BridgeOperationOptions): Promise<CommandResult> {
     const record = await this.requireActiveRecord(input.sessionId, 'clipboard.write', operationResource(input));
     record.clipboard = input.text;
-    const result = await this.desktopAdapter.writeClipboard?.({
+    const writeClipboard = this.requireDesktopAdapterMethod('writeClipboard', 'clipboard.write');
+    const result = await writeClipboard?.({
       session: copySession(record.session),
       ...(record.worker ? { worker: record.worker } : {}),
       text: input.text,
@@ -468,8 +508,11 @@ export class LocalDesktopBridge implements DesktopBridge {
   }
 
   async navigateBrowser(input: { sessionId: string; url: string } & BridgeOperationOptions): Promise<BrowserNavigationResult> {
-    const record = await this.requireActiveRecord(input.sessionId, 'browser.navigate', operationResource(input));
     const url = new URL(input.url);
+    const record = await this.requireActiveRecord(input.sessionId, 'browser.navigate', operationResource({
+      ...input,
+      url,
+    }));
     const decision = await this.networkPolicy({ session: copySession(record.session), url });
     if (!decision.allow) {
       await this.audit('browser.navigate', 'deny', record.session, {
@@ -504,8 +547,14 @@ export class LocalDesktopBridge implements DesktopBridge {
 
   async readDropFile(input: { sessionId: string; relativePath: string } & BridgeOperationOptions): Promise<{ contents: string }> {
     const record = await this.requireActiveRecord(input.sessionId, 'file.readDrop', operationResource(input));
-    const path = resolveDropPath(record.session.dropDir, input.relativePath);
-    const contents = await fs.readFile(path, 'utf8');
+    const path = await resolveExistingDropPath(record.session.dropDir, input.relativePath);
+    const file = await openDropFileNoFollow(path, 'r');
+    let contents: string;
+    try {
+      contents = await file.readFile('utf8');
+    } finally {
+      await file.close();
+    }
     await this.audit('file.readDrop', 'ok', record.session, {
       relativePath: input.relativePath,
       auditCorrelationId: input.auditCorrelationId,
@@ -515,9 +564,14 @@ export class LocalDesktopBridge implements DesktopBridge {
 
   async writeDropFile(input: { sessionId: string; relativePath: string; contents: string } & BridgeOperationOptions): Promise<void> {
     const record = await this.requireActiveRecord(input.sessionId, 'file.writeDrop', operationResource(input));
-    const path = resolveDropPath(record.session.dropDir, input.relativePath);
-    await fs.mkdir(resolve(path, '..'), { recursive: true });
-    await fs.writeFile(path, input.contents, 'utf8');
+    const path = resolveLexicalDropPath(record.session.dropDir, input.relativePath);
+    await ensureDropParentPath(record.session.dropDir, dirname(path));
+    const file = await openDropFileNoFollow(path, 'w');
+    try {
+      await file.writeFile(input.contents, 'utf8');
+    } finally {
+      await file.close();
+    }
     await this.audit('file.writeDrop', 'ok', record.session, {
       relativePath: input.relativePath,
       length: input.contents.length,
@@ -584,7 +638,15 @@ export class LocalDesktopBridge implements DesktopBridge {
     if (!record || record.session.status !== 'active') {
       return;
     }
-    await this.cleanupRecord(record, 'timed_out');
+    try {
+      await this.cleanupRecord(record, 'timed_out');
+    } catch (error) {
+      await this.audit('session.terminate', 'error', record.session, {
+        appId: record.session.appId,
+        reason: formatCleanupError(error),
+      });
+      return;
+    }
     await this.audit('session.terminate', 'error', record.session, {
       appId: record.session.appId,
       reason: 'timeout',
@@ -596,13 +658,49 @@ export class LocalDesktopBridge implements DesktopBridge {
       return;
     }
     clearTimeout(record.timer);
-    await this.browserAdapter.teardownSession?.(sessionContext(record.session, record.worker));
-    await this.desktopAdapter.terminateSession?.(sessionContext(record.session, record.worker));
-    if (record.worker) {
-      await this.remoteWorkerProvisioner?.release({ session: copySession(record.session), worker: record.worker });
-    }
     record.session.status = status;
-    await fs.rm(resolve(record.session.profileDir, '..'), { recursive: true, force: true });
+    const failures = await collectCleanupFailures([
+      () => this.browserAdapter.teardownSession?.(sessionContext(record.session, record.worker)),
+      () => this.desktopAdapter.terminateSession?.(sessionContext(record.session, record.worker)),
+      () => record.worker
+        ? this.remoteWorkerProvisioner?.release({ session: copySession(record.session), worker: record.worker })
+        : undefined,
+      () => fs.rm(resolve(record.session.profileDir, '..'), { recursive: true, force: true }),
+    ]);
+    if (failures.length > 0) {
+      throw new CleanupError(failures);
+    }
+  }
+
+  private async cleanupUnrecordedSession(
+    session: DesktopSession,
+    worker: RemoteWorkerLease | undefined,
+  ): Promise<void> {
+    const failures = await collectCleanupFailures([
+      () => this.browserAdapter.teardownSession?.(sessionContext(session, worker)),
+      () => this.desktopAdapter.terminateSession?.(sessionContext(session, worker)),
+      () => worker
+        ? this.remoteWorkerProvisioner?.release({ session: copySession(session), worker })
+        : undefined,
+      () => fs.rm(resolve(session.profileDir, '..'), { recursive: true, force: true }),
+    ]);
+    if (failures.length > 0) {
+      await this.audit('session.create', 'error', session, {
+        appId: session.appId,
+        reason: formatCleanupError(new CleanupError(failures)),
+      });
+    }
+  }
+
+  private requireDesktopAdapterMethod<K extends keyof DesktopRuntimeAdapter>(
+    method: K,
+    operation: DesktopBridgeOperation,
+  ): DesktopRuntimeAdapter[K] | undefined {
+    const adapterMethod = this.desktopAdapter[method];
+    if (!adapterMethod && this.mode === 'production') {
+      throw new ValidationError(`production mode requires desktop adapter support for ${operation}`);
+    }
+    return adapterMethod;
   }
 
   private async audit(
@@ -689,8 +787,25 @@ function createSessionRecord(input: {
   };
 }
 
-function operationResource(options: BridgeOperationOptions): Record<string, unknown> | undefined {
-  return options.auditCorrelationId ? { auditCorrelationId: options.auditCorrelationId } : undefined;
+function operationResource(options: OperationResourceInput): Record<string, unknown> | undefined {
+  const resource = compactObject({
+    auditCorrelationId: options.auditCorrelationId,
+    x: options.x,
+    y: options.y,
+    button: options.button,
+    textLength: typeof options.text === 'string' ? options.text.length : undefined,
+    contentsLength: typeof options.contents === 'string' ? options.contents.length : undefined,
+    relativePath: typeof options.relativePath === 'string' ? options.relativePath : undefined,
+    ...(options.url instanceof URL
+      ? {
+          url: options.url.toString(),
+          origin: options.url.origin,
+          protocol: options.url.protocol,
+          hostname: options.url.hostname,
+        }
+      : {}),
+  });
+  return Object.keys(resource).length > 0 ? resource : undefined;
 }
 
 function linuxMouseButton(button: MouseButton): string {
@@ -725,15 +840,79 @@ function assertNonNegativeInteger(value: number, field: string): void {
   }
 }
 
-function resolveDropPath(dropDir: string, unsafeRelativePath: string): string {
+function resolveLexicalDropPath(dropDir: string, unsafeRelativePath: string): string {
   requireNonEmpty(unsafeRelativePath, 'relativePath');
   const root = resolve(dropDir);
   const candidate = resolve(root, unsafeRelativePath);
+  assertContainedPath(root, candidate);
+  return candidate;
+}
+
+async function resolveExistingDropPath(dropDir: string, unsafeRelativePath: string): Promise<string> {
+  const candidate = resolveLexicalDropPath(dropDir, unsafeRelativePath);
+  const realRoot = await fs.realpath(dropDir);
+  const realCandidate = await fs.realpath(candidate);
+  assertContainedPath(realRoot, realCandidate);
+  return candidate;
+}
+
+async function ensureDropParentPath(dropDir: string, parentPath: string): Promise<void> {
+  const root = resolve(dropDir);
+  assertContainedPath(root, resolve(parentPath));
+  await fs.mkdir(parentPath, { recursive: true });
+  const realRoot = await fs.realpath(root);
+  const realParent = await fs.realpath(parentPath);
+  assertContainedPath(realRoot, realParent);
+}
+
+async function openDropFileNoFollow(path: string, mode: 'r' | 'w'): Promise<FileHandle> {
+  try {
+    return await fs.open(
+      path,
+      mode === 'r'
+        ? constants.O_RDONLY | constants.O_NOFOLLOW
+        : constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+      0o600,
+    );
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ELOOP') {
+      throw new ValidationError('drop folder paths must stay inside the drop folder');
+    }
+    throw error;
+  }
+}
+
+function assertContainedPath(root: string, candidate: string): void {
   const rel = relative(root, candidate);
   if (rel.startsWith('..') || resolve(rel) === rel) {
     throw new ValidationError('drop folder paths must stay inside the drop folder');
   }
-  return candidate;
+}
+
+async function collectCleanupFailures(
+  cleanupSteps: Array<() => Promise<unknown> | unknown>,
+): Promise<Error[]> {
+  const failures: Error[] = [];
+  for (const cleanupStep of cleanupSteps) {
+    try {
+      await cleanupStep();
+    } catch (error) {
+      failures.push(toError(error));
+    }
+  }
+  return failures;
+}
+
+function formatCleanupError(error: unknown): string {
+  return toError(error).message;
+}
+
+function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && 'code' in error;
 }
 
 function compactObject(input: Record<string, unknown>): Record<string, unknown> {
