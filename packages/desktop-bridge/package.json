@@ -9,6 +9,10 @@
     ".": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc -b"
+    "build": "tsc -b",
+    "test": "vitest run --root ../.."
+  },
+  "dependencies": {
+    "@fagaos/audit-log": "*"
   }
 }
