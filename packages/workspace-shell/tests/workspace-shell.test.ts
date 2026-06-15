@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { AgentCardSchema, type AgentCard } from '../../agent-manifest/src/index.js';
+import { createInMemoryAuditLog } from '../../audit-log/src/index.js';
 import {
+  ControlPlane,
+  createInMemoryCardRegistry,
+} from '../../control-plane/src/index.js';
+import {
+  ControlPlaneWorkspaceOperationsAdapter,
   createMockWorkspaceShellAdapter,
   loadWorkspaceShell,
   renderWorkspaceShellHtml,
@@ -255,4 +262,209 @@ describe('@fagaos/workspace-shell', () => {
     expect(html).toContain('Loading Dashboard...');
     expect(html).toContain('aria-busy="true"');
   });
+
+  it('builds agent, task, session, and audit read models from durable control-plane state', async () => {
+    const fixture = await createControlPlaneFixture();
+    const task = await fixture.controlPlane.enqueueTask({
+      sessionId: fixture.sessionId,
+      tool: 'browser.navigate',
+      arguments: { url: 'https://example.test' },
+      createdBy: { id: 'user:alice', type: 'user' },
+      capabilityCheck: { ok: true, policyId: 'policy.browser' },
+      maxAttempts: 2,
+    });
+    await fixture.controlPlane.claimTask({ workerId: 'worker-1', leaseMs: 30_000 });
+
+    const adapter = new ControlPlaneWorkspaceOperationsAdapter({
+      controlPlane: fixture.controlPlane,
+      audit: fixture.audit,
+      cards: fixture.cards,
+      now: () => new Date('2026-06-15T12:00:10.000Z'),
+    });
+
+    await expect(adapter.listAgents()).resolves.toEqual([
+      expect.objectContaining({
+        id: 'agent.ops',
+        name: 'Ops Agent',
+        status: 'running',
+        currentTaskId: task.id,
+        capabilities: ['browser.navigate', 'email.send'],
+        policyScope: 'policy.browser',
+        recentTaskIds: [task.id],
+        health: expect.objectContaining({ state: 'running', recentFailureCount: 0 }),
+      }),
+    ]);
+    await expect(adapter.listTasks()).resolves.toEqual([
+      expect.objectContaining({
+        id: task.id,
+        status: 'running',
+        assigneeId: 'agent.ops',
+        sessionId: fixture.sessionId,
+        dependencies: [fixture.sessionId],
+        timeline: expect.arrayContaining([
+          expect.objectContaining({ state: 'queued', source: 'task.enqueue' }),
+          expect.objectContaining({ state: 'running', source: 'task.claim' }),
+        ]),
+      }),
+    ]);
+    await expect(adapter.listSessions()).resolves.toEqual([
+      expect.objectContaining({
+        id: fixture.sessionId,
+        agentId: 'agent.ops',
+        taskId: task.id,
+        state: 'running',
+        currentAgentTool: 'browser.navigate',
+        pendingApprovalCount: 0,
+        runtimeMs: 10_000,
+        cost: { amount: 0, currency: 'USD' },
+      }),
+    ]);
+    await expect(adapter.listAuditEntries()).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          actor: 'user:alice',
+          action: 'task.enqueue',
+          resource: task.id,
+          outcome: 'ok',
+        }),
+      ]),
+    );
+  });
+
+  it('maps denied capability checks and stale leases into permission-safe workflow states', async () => {
+    const fixture = await createControlPlaneFixture();
+    const denied = await fixture.controlPlane.enqueueTask({
+      sessionId: fixture.sessionId,
+      tool: 'email.send',
+      arguments: {},
+      createdBy: { id: 'user:alice', type: 'user' },
+      capabilityCheck: { ok: false, reason: 'requires approval' },
+    });
+    const stale = await fixture.controlPlane.enqueueTask({
+      sessionId: fixture.sessionId,
+      tool: 'browser.navigate',
+      arguments: {},
+      createdBy: { id: 'user:alice', type: 'user' },
+      capabilityCheck: { ok: true },
+    });
+    await fixture.controlPlane.claimTask({ workerId: 'worker-1', leaseMs: 1_000 });
+
+    const adapter = new ControlPlaneWorkspaceOperationsAdapter({
+      controlPlane: fixture.controlPlane,
+      audit: fixture.audit,
+      cards: fixture.cards,
+      now: () => new Date('2026-06-15T12:00:02.000Z'),
+    });
+
+    const tasks = await adapter.listTasks();
+    const sessions = await adapter.listSessions();
+
+    expect(tasks.find((task) => task.id === denied.id)?.status).toBe('waiting_on_approval');
+    expect(tasks.find((task) => task.id === stale.id)?.status).toBe('blocked');
+    expect(sessions[0]?.state).toBe('suspect');
+  });
+
+  it('requires explicit operator permissions before intervention actions mutate control-plane state', async () => {
+    const fixture = await createControlPlaneFixture();
+    const task = await fixture.controlPlane.enqueueTask({
+      sessionId: fixture.sessionId,
+      tool: 'browser.navigate',
+      arguments: {},
+      createdBy: { id: 'user:alice', type: 'user' },
+      capabilityCheck: { ok: true },
+    });
+    const adapter = new ControlPlaneWorkspaceOperationsAdapter({
+      controlPlane: fixture.controlPlane,
+      audit: fixture.audit,
+      cards: fixture.cards,
+    });
+
+    await expect(
+      adapter.cancelTask({
+        taskId: task.id,
+        reason: 'operator denied test',
+        actor: { id: 'user:bob', type: 'user', permissions: [] },
+      }),
+    ).rejects.toMatchObject({ code: 'permission_denied' });
+    expect(fixture.controlPlane.getTask(task.id).state).toBe('queued');
+
+    await adapter.cancelTask({
+      taskId: task.id,
+      reason: 'operator request',
+      actor: { id: 'user:alice', type: 'user', permissions: ['tasks:cancel'] },
+    });
+    expect(fixture.controlPlane.getTask(task.id)).toMatchObject({
+      state: 'cancelled',
+      terminalReason: 'operator request',
+    });
+
+    await expect(
+      adapter.killSession({
+        sessionId: fixture.sessionId,
+        reason: 'operator denied test',
+        actor: { id: 'user:bob', type: 'user', permissions: [] },
+      }),
+    ).rejects.toMatchObject({ code: 'permission_denied' });
+
+    await adapter.killSession({
+      sessionId: fixture.sessionId,
+      reason: 'operator kill',
+      actor: { id: 'user:alice', type: 'user', permissions: ['sessions:kill'] },
+    });
+    expect(fixture.controlPlane.getSession(fixture.sessionId).state).toBe('killed');
+  });
 });
+
+function card(): AgentCard {
+  return AgentCardSchema.parse({
+    id: 'agent.ops',
+    name: 'Ops Agent',
+    description: 'Runs browser and email operations',
+    version: '1.0.0',
+    owner: { id: 'team:ops' },
+    auth: { kind: 'none' },
+    capabilities: [
+      { name: 'browser.navigate', scope: 'workspace' },
+      { name: 'email.send', scope: 'external' },
+    ],
+    toolServers: [
+      {
+        id: 'browser',
+        implementation: 'tool.browser',
+        category: 'browser',
+        endpoints: ['browser-mcp'],
+      },
+    ],
+    mcpEndpoints: [
+      {
+        id: 'browser-mcp',
+        name: 'Browser MCP',
+        role: 'client',
+        transport: 'stdio',
+        command: 'browser-mcp',
+      },
+    ],
+  });
+}
+
+async function createControlPlaneFixture(): Promise<{
+  audit: ReturnType<typeof createInMemoryAuditLog>;
+  cards: ReturnType<typeof createInMemoryCardRegistry>;
+  controlPlane: ControlPlane;
+  sessionId: string;
+}> {
+  const audit = createInMemoryAuditLog({ clock: () => new Date('2026-06-15T12:00:00.000Z') });
+  const cards = createInMemoryCardRegistry();
+  cards.register(card());
+  const controlPlane = new ControlPlane({
+    audit,
+    cards,
+    clock: () => new Date('2026-06-15T12:00:00.000Z'),
+  });
+  const session = await controlPlane.createSession({
+    agentId: 'agent.ops',
+    createdBy: { id: 'user:alice', type: 'user' },
+    input: { taskId: 'task.manual' },
+  });
+  return { audit, cards, controlPlane, sessionId: session.id };
+}

@@ -1,3 +1,12 @@
+import type { AgentCard } from '@fagaos/agent-manifest';
+import type { AuditEntry, AuditLog } from '@fagaos/audit-log';
+import type {
+  AgentCardRegistry,
+  ControlPlane,
+  ControlPlaneTask,
+  Session,
+} from '@fagaos/control-plane';
+
 export type WorkspaceViewId =
   | 'dashboard'
   | 'agents'
@@ -85,6 +94,16 @@ export interface WorkspaceAgent {
   status: AgentStatus;
   currentTaskId?: string;
   recentFailureCount: number;
+  capabilities?: string[];
+  connectedAccountIds?: string[];
+  policyScope?: string;
+  recentTaskIds?: string[];
+  health?: {
+    state: AgentStatus;
+    recentFailureCount: number;
+    lastActiveAt?: string;
+  };
+  actions?: WorkspaceInterventionAction[];
 }
 
 export interface WorkspaceTask {
@@ -93,6 +112,16 @@ export interface WorkspaceTask {
   status: TaskStatus;
   assigneeId: string;
   priority: 'low' | 'medium' | 'high' | 'urgent';
+  sessionId?: string;
+  dependencies?: string[];
+  timeline?: WorkspaceTaskTimelineEntry[];
+  artifacts?: WorkspaceArtifact[];
+  comments?: WorkspaceComment[];
+  retry?: {
+    attempt: number;
+    maxAttempts: number;
+  };
+  actions?: WorkspaceInterventionAction[];
 }
 
 export interface WorkspaceSession {
@@ -103,6 +132,15 @@ export interface WorkspaceSession {
   lastHeartbeatAt: string;
   currentAction: string;
   pendingApprovalCount: number;
+  currentAgentTool?: string | null;
+  checkpoints?: WorkspaceCheckpoint[];
+  toolCalls?: WorkspaceToolCall[];
+  pendingApprovals?: WorkspaceApproval[];
+  logs?: WorkspaceAuditEntry[];
+  artifacts?: WorkspaceArtifact[];
+  cost?: WorkspaceCostCounter;
+  runtimeMs?: number;
+  actions?: WorkspaceInterventionAction[];
 }
 
 export interface WorkspaceAccount {
@@ -140,6 +178,95 @@ export interface WorkspaceAuditEntry {
   resource: string;
   outcome: AuditOutcome;
   createdAt: string;
+}
+
+export type WorkspaceInterventionKind =
+  | 'agent.edit'
+  | 'agent.pause'
+  | 'agent.archive'
+  | 'task.retry'
+  | 'task.cancel'
+  | 'session.pause'
+  | 'session.resume'
+  | 'session.kill'
+  | 'session.escalate';
+
+export interface WorkspaceInterventionAction {
+  kind: WorkspaceInterventionKind;
+  label: string;
+  permission: WorkspaceOperatorPermission;
+  enabled: boolean;
+  reason?: string;
+}
+
+export interface WorkspaceTaskTimelineEntry {
+  state: TaskStatus;
+  at: string;
+  actor: string;
+  source: string;
+}
+
+export interface WorkspaceArtifact {
+  id: string;
+  label: string;
+  kind: string;
+  createdAt: string;
+}
+
+export interface WorkspaceComment {
+  id: string;
+  actor: string;
+  body: string;
+  createdAt: string;
+}
+
+export interface WorkspaceCheckpoint {
+  id: string;
+  label: string;
+  createdAt: string;
+}
+
+export interface WorkspaceToolCall {
+  id: string;
+  tool: string;
+  ok: boolean;
+  durationMs: number;
+  createdAt: string;
+  error: string | null;
+}
+
+export interface WorkspaceCostCounter {
+  amount: number;
+  currency: 'USD';
+}
+
+export type WorkspaceOperatorPermission =
+  | 'agents:edit'
+  | 'agents:pause'
+  | 'agents:archive'
+  | 'tasks:retry'
+  | 'tasks:cancel'
+  | 'sessions:pause'
+  | 'sessions:resume'
+  | 'sessions:kill'
+  | 'sessions:escalate';
+
+export interface WorkspaceOperationActor {
+  id: string;
+  type: 'user' | 'agent' | 'system';
+  permissions: WorkspaceOperatorPermission[];
+}
+
+export class WorkspacePermissionError extends Error {
+  readonly code = 'permission_denied';
+
+  constructor(
+    public readonly permission: WorkspaceOperatorPermission,
+    message = `Missing permission: ${permission}`,
+  ) {
+    super(message);
+    this.name = 'WorkspacePermissionError';
+  }
 }
 
 export interface WorkspaceReadModels {
@@ -292,6 +419,232 @@ export function createMockWorkspaceShellAdapter(
   };
 }
 
+export interface ControlPlaneWorkspaceOperationsAdapterOptions {
+  controlPlane: ControlPlane;
+  audit: AuditLog;
+  cards: AgentCardRegistry;
+  now?: () => Date;
+}
+
+export interface CancelWorkspaceTaskInput {
+  taskId: string;
+  reason: string;
+  actor: WorkspaceOperationActor;
+}
+
+export interface KillWorkspaceSessionInput {
+  sessionId: string;
+  reason: string;
+  actor: WorkspaceOperationActor;
+}
+
+export interface EscalateWorkspaceSessionInput {
+  sessionId: string;
+  reason: string;
+  severity: EscalationSeverity;
+  actor: WorkspaceOperationActor;
+}
+
+export class ControlPlaneWorkspaceOperationsAdapter implements WorkspaceShellAdapter {
+  private readonly controlPlane: ControlPlane;
+  private readonly audit: AuditLog;
+  private readonly cards: AgentCardRegistry;
+  private readonly now: () => Date;
+
+  constructor(opts: ControlPlaneWorkspaceOperationsAdapterOptions) {
+    this.controlPlane = opts.controlPlane;
+    this.audit = opts.audit;
+    this.cards = opts.cards;
+    this.now = opts.now ?? (() => new Date());
+  }
+
+  async listAgents(): Promise<WorkspaceAgent[]> {
+    const tasks = this.controlPlane.listTasks();
+    const sessions = this.controlPlane.listSessions();
+    return this.cards.list().map((card) => {
+      const agentSessions = sessions.filter((session) => session.agentId === card.id);
+      const agentTasks = tasks.filter((task) =>
+        agentSessions.some((session) => session.id === task.sessionId),
+      );
+      const activeTask = findCurrentTask(agentTasks, this.now());
+      const recentFailures = agentTasks.filter((task) => task.state === 'failed').length;
+      const status = agentStatus(card, agentTasks, agentSessions, this.now());
+      const policyScope = firstPolicyScope(card, agentTasks);
+      return withOptionalFields<WorkspaceAgent>({
+        id: card.id,
+        name: card.name,
+        role: card.owner.name ?? card.owner.id,
+        status,
+        recentFailureCount: recentFailures,
+        ...optionalField('currentTaskId', activeTask?.id),
+        capabilities: card.capabilities.map((capability) => capability.name),
+        connectedAccountIds: accountIdsFromCard(card),
+        ...optionalField('policyScope', policyScope),
+        recentTaskIds: [...agentTasks]
+          .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+          .slice(0, 5)
+          .map((task) => task.id),
+        health: withOptionalFields({
+          state: status,
+          recentFailureCount: recentFailures,
+          ...optionalField('lastActiveAt', activeTask?.updatedAt ?? agentSessions[0]?.updatedAt),
+        }),
+        actions: agentActions(status),
+      });
+    });
+  }
+
+  async listTasks(): Promise<WorkspaceTask[]> {
+    const auditEntries = await this.audit.read({ limit: 1000 });
+    const sessions = this.controlPlane.listSessions();
+    return this.controlPlane.listTasks().map((task) => {
+      const session = sessions.find((candidate) => candidate.id === task.sessionId);
+      const status = mapTaskStatus(task, this.now());
+      return {
+        id: task.id,
+        title: task.tool,
+        status,
+        assigneeId: session?.agentId ?? task.createdBy.id,
+        priority: taskPriority(task, status),
+        sessionId: task.sessionId,
+        dependencies: [task.sessionId],
+        timeline: taskTimeline(task, auditEntries, this.now()),
+        artifacts: artifactsFromTask(task),
+        comments: commentsFromTask(task),
+        retry: { attempt: task.attempt, maxAttempts: task.maxAttempts },
+        actions: taskActions(task, status),
+      };
+    });
+  }
+
+  async listSessions(): Promise<WorkspaceSession[]> {
+    const tasks = this.controlPlane.listTasks();
+    const auditEntries = await this.audit.read({ limit: 1000 });
+    const toolCalls = this.controlPlane.listToolInvocations();
+    return this.controlPlane.listSessions().map((session) => {
+      const sessionTasks = tasks.filter((task) => task.sessionId === session.id);
+      const currentTask = findCurrentTask(sessionTasks, this.now());
+      const currentTool = currentTask?.tool ?? latestToolCall(toolCalls, session.id)?.tool ?? null;
+      const logs = auditEntries
+        .filter((entry) => entry.resource.id === session.id || entry.data['sessionId'] === session.id)
+        .map(mapAuditEntry);
+      const pendingApprovals = approvalsForTasks(sessionTasks);
+      return withOptionalFields<WorkspaceSession>({
+        id: session.id,
+        agentId: session.agentId,
+        taskId: currentTask?.id ?? session.input['taskId']?.toString() ?? session.id,
+        state: mapSessionState(session, sessionTasks, this.now()),
+        lastHeartbeatAt: currentTask?.updatedAt ?? session.updatedAt,
+        currentAction: currentTool ?? session.state,
+        pendingApprovalCount: pendingApprovals.length,
+        currentAgentTool: currentTool,
+        checkpoints: checkpointsFromAudit(logs),
+        toolCalls: toolCalls
+          .filter((call) => call.sessionId === session.id)
+          .map((call) => ({
+            id: call.id,
+            tool: call.tool,
+            ok: call.ok,
+            durationMs: call.durationMs,
+            createdAt: call.createdAt,
+            error: call.error,
+          })),
+        pendingApprovals,
+        logs,
+        artifacts: artifactsFromSession(session, sessionTasks),
+        cost: { amount: 0, currency: 'USD' },
+        runtimeMs: Math.max(0, this.now().getTime() - Date.parse(session.createdAt)),
+        actions: sessionActions(session, sessionTasks, this.now()),
+      });
+    });
+  }
+
+  async listAccounts(): Promise<WorkspaceAccount[]> {
+    return [];
+  }
+
+  async listApprovals(): Promise<WorkspaceApproval[]> {
+    return approvalsForTasks(this.controlPlane.listTasks());
+  }
+
+  async listEscalations(): Promise<WorkspaceEscalation[]> {
+    const tasks = this.controlPlane.listTasks();
+    return tasks
+      .filter((task) => mapTaskStatus(task, this.now()) === 'blocked')
+      .map((task) => ({
+        id: `escalation:${task.id}`,
+        severity: 'warning',
+        title: `Task ${task.id} requires operator review`,
+        state: 'open',
+        source: task.id,
+        createdAt: task.updatedAt,
+      }));
+  }
+
+  async listAuditEntries(): Promise<WorkspaceAuditEntry[]> {
+    const entries = await this.audit.read({ limit: 1000 });
+    return entries.map(mapAuditEntry);
+  }
+
+  async getPermissions(): Promise<PermissionSet> {
+    return EMPTY_PERMISSIONS;
+  }
+
+  async cancelTask(input: CancelWorkspaceTaskInput): Promise<WorkspaceTask> {
+    await this.requirePermission(input.actor, 'tasks:cancel', { kind: 'task', id: input.taskId });
+    const task = await this.controlPlane.cancelTask(input.taskId, {
+      reason: input.reason,
+      actor: { id: input.actor.id, type: input.actor.type },
+    });
+    return (await this.listTasks()).find((item) => item.id === task.id)!;
+  }
+
+  async killSession(input: KillWorkspaceSessionInput): Promise<WorkspaceSession> {
+    await this.requirePermission(input.actor, 'sessions:kill', {
+      kind: 'session',
+      id: input.sessionId,
+    });
+    await this.controlPlane.killSession(input.sessionId, input.reason);
+    return (await this.listSessions()).find((item) => item.id === input.sessionId)!;
+  }
+
+  async escalateSession(input: EscalateWorkspaceSessionInput): Promise<WorkspaceEscalation> {
+    await this.requirePermission(input.actor, 'sessions:escalate', {
+      kind: 'session',
+      id: input.sessionId,
+    });
+    const result = await this.audit.append({
+      actor: { id: input.actor.id, type: input.actor.type },
+      action: 'session.escalate',
+      resource: { kind: 'session', id: input.sessionId },
+      data: { reason: input.reason, severity: input.severity },
+    });
+    return {
+      id: `escalation:${result.id}`,
+      severity: input.severity,
+      title: input.reason,
+      state: 'open',
+      source: input.sessionId,
+      createdAt: result.ts,
+    };
+  }
+
+  private async requirePermission(
+    actor: WorkspaceOperationActor,
+    permission: WorkspaceOperatorPermission,
+    resource: { kind: string; id: string },
+  ): Promise<void> {
+    if (actor.permissions.includes(permission)) return;
+    await this.audit.append({
+      actor: { id: actor.id, type: actor.type },
+      action: 'intervention.deny',
+      resource,
+      data: { permission },
+    });
+    throw new WorkspacePermissionError(permission);
+  }
+}
+
 async function resolveModel<T>(
   source: WorkspaceReadModelName,
   value: T,
@@ -300,6 +653,323 @@ async function resolveModel<T>(
   const failure = failures[source];
   if (failure) throw failure;
   return value;
+}
+
+function withOptionalFields<T extends object>(value: T): T {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, field]) => field !== undefined),
+  ) as T;
+}
+
+function optionalField<K extends string, V>(
+  key: K,
+  value: V | undefined,
+): V extends undefined ? Record<never, never> : Partial<Record<K, V>> {
+  return (value === undefined ? {} : { [key]: value }) as V extends undefined
+    ? Record<never, never>
+    : Partial<Record<K, V>>;
+}
+
+function agentStatus(
+  _card: AgentCard,
+  tasks: ControlPlaneTask[],
+  sessions: Session[],
+  now: Date,
+): AgentStatus {
+  if (sessions.some((session) => session.state === 'killed')) return 'disabled';
+  if (tasks.some((task) => mapTaskStatus(task, now) === 'blocked')) return 'degraded';
+  if (tasks.some((task) => mapTaskStatus(task, now) === 'running')) return 'running';
+  if (sessions.some((session) => session.state === 'running')) return 'active';
+  return 'idle';
+}
+
+function firstPolicyScope(card: AgentCard, tasks: ControlPlaneTask[]): string | undefined {
+  const fromTask = tasks.find((task) => task.capabilityCheck.policyId)?.capabilityCheck.policyId;
+  return fromTask ?? card.capabilities.find((capability) => capability.scope)?.scope;
+}
+
+function accountIdsFromCard(card: AgentCard): string[] {
+  const metadataAccounts = card.metadata?.['connectedAccountIds'];
+  return typeof metadataAccounts === 'string' ? metadataAccounts.split(',').filter(Boolean) : [];
+}
+
+function findCurrentTask(tasks: ControlPlaneTask[], now: Date): ControlPlaneTask | undefined {
+  return [...tasks]
+    .filter((task) => ['queued', 'running', 'waiting_on_approval', 'blocked'].includes(mapTaskStatus(task, now)))
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0];
+}
+
+function mapTaskStatus(task: ControlPlaneTask, now: Date): TaskStatus {
+  if (!task.capabilityCheck.ok) return 'waiting_on_approval';
+  if (task.state === 'queued') return 'queued';
+  if (task.state === 'claimed') {
+    if (task.leaseExpiresAt !== null && Date.parse(task.leaseExpiresAt) <= now.getTime()) {
+      return 'blocked';
+    }
+    return 'running';
+  }
+  if (task.state === 'completed') return 'completed';
+  if (task.state === 'failed') return 'failed';
+  if (task.state === 'cancelled') return 'cancelled';
+  return exhaustiveTaskState(task.state);
+}
+
+function exhaustiveTaskState(state: never): never {
+  throw new Error(`Unhandled task state: ${state}`);
+}
+
+function taskPriority(task: ControlPlaneTask, status: TaskStatus): WorkspaceTask['priority'] {
+  if (status === 'blocked' || status === 'failed') return 'high';
+  if (!task.capabilityCheck.ok) return 'urgent';
+  return 'medium';
+}
+
+function taskTimeline(
+  task: ControlPlaneTask,
+  entries: AuditEntry[],
+  now: Date,
+): WorkspaceTaskTimelineEntry[] {
+  const fromAudit = entries
+    .filter((entry) => entry.resource.kind === 'task' && entry.resource.id === task.id)
+    .map((entry) => ({
+      state: timelineState(entry.action, task, now),
+      at: entry.ts,
+      actor: entry.actor.id,
+      source: entry.action,
+    }));
+  if (fromAudit.length > 0) return fromAudit;
+  return [
+    {
+      state: mapTaskStatus(task, now),
+      at: task.updatedAt,
+      actor: task.createdBy.id,
+      source: 'repository',
+    },
+  ];
+}
+
+function timelineState(action: string, task: ControlPlaneTask, now: Date): TaskStatus {
+  switch (action) {
+    case 'task.enqueue':
+    case 'task.retry':
+      return task.capabilityCheck.ok ? 'queued' : 'waiting_on_approval';
+    case 'task.claim':
+    case 'task.heartbeat':
+      return mapTaskStatus(task, now) === 'blocked' ? 'blocked' : 'running';
+    case 'task.complete':
+      return 'completed';
+    case 'task.fail':
+      return 'failed';
+    case 'task.cancel':
+      return 'cancelled';
+    case 'task.recover':
+      return 'queued';
+    default:
+      return mapTaskStatus(task, now);
+  }
+}
+
+function artifactsFromTask(task: ControlPlaneTask): WorkspaceArtifact[] {
+  if (!task.result) return [];
+  return [
+    {
+      id: `artifact:${task.id}:result`,
+      label: `${task.tool} result`,
+      kind: 'task_result',
+      createdAt: task.updatedAt,
+    },
+  ];
+}
+
+function artifactsFromSession(session: Session, tasks: ControlPlaneTask[]): WorkspaceArtifact[] {
+  const taskArtifacts = tasks.flatMap(artifactsFromTask);
+  if (!session.result) return taskArtifacts;
+  return [
+    ...taskArtifacts,
+    {
+      id: `artifact:${session.id}:result`,
+      label: 'Session result',
+      kind: 'session_result',
+      createdAt: session.updatedAt,
+    },
+  ];
+}
+
+function commentsFromTask(task: ControlPlaneTask): WorkspaceComment[] {
+  return task.terminalReason
+    ? [
+        {
+          id: `comment:${task.id}:terminal`,
+          actor: task.claimedBy ?? task.createdBy.id,
+          body: task.terminalReason,
+          createdAt: task.updatedAt,
+        },
+      ]
+    : [];
+}
+
+function mapSessionState(
+  session: Session,
+  tasks: ControlPlaneTask[],
+  now: Date,
+): WorkspaceSessionState {
+  if (tasks.some((task) => mapTaskStatus(task, now) === 'blocked')) return 'suspect';
+  switch (session.state) {
+    case 'pending':
+      return 'idle';
+    case 'running':
+      return tasks.some((task) => mapTaskStatus(task, now) === 'waiting_on_approval')
+        ? 'waiting'
+        : 'running';
+    case 'suspended':
+      return 'waiting';
+    case 'completed':
+      return 'completed';
+    case 'killed':
+      return 'killed';
+    case 'crashed':
+      return 'crashed';
+  }
+}
+
+function latestToolCall(
+  calls: ReturnType<ControlPlane['listToolInvocations']>,
+  sessionId: string,
+): ReturnType<ControlPlane['listToolInvocations']>[number] | undefined {
+  return calls
+    .filter((call) => call.sessionId === sessionId)
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
+}
+
+function approvalsForTasks(tasks: ControlPlaneTask[]): WorkspaceApproval[] {
+  return tasks
+    .filter((task) => !task.capabilityCheck.ok)
+    .map((task) => ({
+      id: `approval:${task.id}`,
+      action: task.tool,
+      state: 'requested',
+      risk: task.capabilityCheck.reason ?? 'policy approval required',
+      resourceLabel: task.tool,
+      taskId: task.id,
+      requestedAt: task.updatedAt,
+    }));
+}
+
+function mapAuditEntry(entry: AuditEntry): WorkspaceAuditEntry {
+  return {
+    id: entry.id,
+    sequence: entry.seq,
+    actor: entry.actor.id,
+    action: entry.action,
+    resource: entry.resource.id,
+    outcome: auditOutcome(entry),
+    createdAt: entry.ts,
+  };
+}
+
+function auditOutcome(entry: AuditEntry): AuditOutcome {
+  if (entry.action.endsWith('.deny') || entry.action === 'intervention.deny') return 'denied';
+  if (entry.action.endsWith('.fail')) return 'failed';
+  return 'ok';
+}
+
+function checkpointsFromAudit(entries: WorkspaceAuditEntry[]): WorkspaceCheckpoint[] {
+  return entries
+    .filter((entry) => entry.action === 'session.create' || entry.action === 'task.complete')
+    .map((entry) => ({
+      id: `checkpoint:${entry.id}`,
+      label: entry.action,
+      createdAt: entry.createdAt,
+    }));
+}
+
+function agentActions(status: AgentStatus): WorkspaceInterventionAction[] {
+  const actions: WorkspaceInterventionAction[] = [
+    {
+      kind: 'agent.edit',
+      label: 'Edit',
+      permission: 'agents:edit',
+      enabled: true,
+    },
+    {
+      kind: 'agent.pause',
+      label: 'Pause',
+      permission: 'agents:pause',
+      enabled: false,
+      reason: 'Agent pause waits for production auth and lifecycle controls from FAG-23.',
+    },
+    {
+      kind: 'agent.archive',
+      label: 'Archive',
+      permission: 'agents:archive',
+      enabled: status !== 'running',
+      ...optionalField('reason', status === 'running' ? 'Running agents cannot be archived.' : undefined),
+    },
+  ];
+  return actions.map((action) => withOptionalFields(action));
+}
+
+function taskActions(task: ControlPlaneTask, status: TaskStatus): WorkspaceInterventionAction[] {
+  const terminal = status === 'completed' || status === 'failed' || status === 'cancelled';
+  const actions: WorkspaceInterventionAction[] = [
+    {
+      kind: 'task.cancel',
+      label: 'Cancel',
+      permission: 'tasks:cancel',
+      enabled: !terminal,
+      ...optionalField('reason', terminal ? 'Terminal tasks cannot be cancelled.' : undefined),
+    },
+    {
+      kind: 'task.retry',
+      label: 'Retry',
+      permission: 'tasks:retry',
+      enabled: status === 'failed' && task.attempt < task.maxAttempts,
+      ...optionalField(
+        'reason',
+        status === 'failed' ? undefined : 'Retry is only available for failed tasks.',
+      ),
+    },
+  ];
+  return actions.map((action) => withOptionalFields(action));
+}
+
+function sessionActions(
+  session: Session,
+  tasks: ControlPlaneTask[],
+  now: Date,
+): WorkspaceInterventionAction[] {
+  const state = mapSessionState(session, tasks, now);
+  const terminal = state === 'completed' || state === 'dead' || state === 'crashed' || state === 'killed';
+  const actions: WorkspaceInterventionAction[] = [
+    {
+      kind: 'session.pause',
+      label: 'Pause',
+      permission: 'sessions:pause',
+      enabled: false,
+      reason: 'Session pause is not supported by the current control-plane session lifecycle.',
+    },
+    {
+      kind: 'session.resume',
+      label: 'Resume',
+      permission: 'sessions:resume',
+      enabled: false,
+      reason: 'Session resume is not supported by the current control-plane session lifecycle.',
+    },
+    {
+      kind: 'session.kill',
+      label: 'Kill',
+      permission: 'sessions:kill',
+      enabled: !terminal,
+      ...optionalField('reason', terminal ? 'Terminal sessions cannot be killed.' : undefined),
+    },
+    {
+      kind: 'session.escalate',
+      label: 'Escalate',
+      permission: 'sessions:escalate',
+      enabled: true,
+    },
+  ];
+  return actions.map((action) => withOptionalFields(action));
 }
 
 export async function loadWorkspaceShell(
