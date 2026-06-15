@@ -17,8 +17,13 @@ import { createControlPlaneServer } from './bootstrap.js';
 
 const PORT = Number(process.env['PORT'] ?? 8080);
 const HOST = process.env['HOST'] ?? '127.0.0.1';
+const STATE_FILE = process.env['FAGAOS_CONTROL_PLANE_STATE_FILE'];
 
-const { sampleCard, server } = createControlPlaneServer({ port: PORT, host: HOST });
+const { sampleCard, server } = createControlPlaneServer({
+  port: PORT,
+  host: HOST,
+  ...(STATE_FILE ? { stateFile: STATE_FILE } : {}),
+});
 
 server.listen(PORT, HOST).then(({ port, close }) => {
   // eslint-disable-next-line no-console
@@ -26,6 +31,7 @@ server.listen(PORT, HOST).then(({ port, close }) => {
     `[fagaos-control-plane] listening on http://${HOST}:${port}\n` +
       `  - sample card: ${sampleCard.id} v${sampleCard.version}\n` +
       `  - audit log: ${auditLogContractVersion}\n` +
+      `  - state: ${STATE_FILE ?? 'in-memory'}\n` +
       `  - OpenAPI:  docs/api/control-plane.openapi.yaml`,
   );
   // Stash the close handle for graceful shutdown in Phase 1.

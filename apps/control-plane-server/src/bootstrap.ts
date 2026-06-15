@@ -1,4 +1,8 @@
-import { ControlPlane, createInMemoryCardRegistry } from '@fagaos/control-plane';
+import {
+  ControlPlane,
+  JsonFileControlPlaneRepository,
+  createInMemoryCardRegistry,
+} from '@fagaos/control-plane';
 import { createHttpServer } from '@fagaos/control-plane/http';
 import { createInMemoryAuditLog } from '@fagaos/audit-log';
 import type { z } from 'zod';
@@ -9,6 +13,7 @@ type AgentCardInput = z.input<typeof AgentCardSchema>;
 export interface ControlPlaneServerConfig {
   port: number;
   host: string;
+  stateFile?: string;
 }
 
 export function createSampleCard(config: ControlPlaneServerConfig): AgentCardInput {
@@ -47,8 +52,11 @@ export function createControlPlaneServer(config: ControlPlaneServerConfig) {
   const sampleCard = createSampleCard(config);
   const parsedSampleCard = AgentCardSchema.parse(sampleCard);
   cards.register(parsedSampleCard);
+  const repository = config.stateFile
+    ? new JsonFileControlPlaneRepository({ filePath: config.stateFile })
+    : undefined;
 
-  const controlPlane = new ControlPlane({ audit, cards });
+  const controlPlane = new ControlPlane({ audit, cards, ...(repository ? { repository } : {}) });
   const server = createHttpServer({ controlPlane, exposeCardRegistration: true });
 
   return {

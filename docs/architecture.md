@@ -86,6 +86,13 @@ Tiered:
 SQLite/Postgres only, no exotic stores. Checkpoints at every
 tool-call boundary, encrypted at rest, replayed on restart.
 
+The control plane now persists session, task, tool invocation,
+capability-check, and audit-correlation records through an injectable
+repository. Local development can use the file-backed durable backend;
+SQLite/Postgres adapters should implement the same boundary. Scheduler
+leases, retries, cancellation, and recovery semantics are specified in
+[`control-plane-state.md`](control-plane-state.md).
+
 ## 6. Sandboxing — four layers, mandatory
 
 1. **WASM** (Wasmtime) for LLM-generated code execution — no network,
@@ -159,7 +166,10 @@ The top three risks, full register in `risk-assessment.md`:
 
 5 s heartbeat, 3 misses = `SUSPECT`, capability tokens suspended,
 restart from last checkpoint (≤3 attempts), then escalate to the
-human owner.
+human owner. The Phase 2 control-plane scheduler models this with
+worker leases: claimed tasks heartbeat to extend `leaseExpiresAt`;
+expired leases are requeued by recovery; failed claims retry until
+`maxAttempts` and then become terminal `failed`.
 
 ## 11. Lifecycle states
 

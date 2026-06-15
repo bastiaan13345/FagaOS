@@ -31,39 +31,34 @@ import type {
   AuditEntry,
   AuditLog,
 } from '@fagaos/audit-log';
+import {
+  InMemoryControlPlaneRepository,
+  type CapabilityCheckOutcome,
+  type ControlPlaneRepository,
+  type ControlPlaneTask,
+} from './repository.js';
+import {
+  SessionStateSchema,
+  type Actor,
+  type Session,
+  type SessionId,
+  type ToolInvocationRecord,
+} from './types.js';
 
 /* ----------------------------- Session model ----------------------------- */
 
-export const SessionStateSchema = z.enum([
-  'pending',
-  'running',
-  'suspended',
-  'completed',
-  'killed',
-  'crashed',
-]);
-export type SessionState = z.infer<typeof SessionStateSchema>;
-
-/** A session is a single bounded run of an agent. */
-export interface Session {
-  id: string;
-  agentId: string;
-  agentVersion: string;
-  /** Hash of the AgentCard at session creation time. Detects card drift. */
-  agentCardHash: string;
-  state: SessionState;
-  createdAt: string;
-  updatedAt: string;
-  /** Originator of the request — user/agent id and (best-effort) type. */
-  createdBy: { id: string; type: 'user' | 'agent' | 'system' };
-  /** Free-form input to the agent (prompt, task, etc.). */
-  input: Record<string, unknown>;
-  /** Most recent result, if any. */
-  result: Record<string, unknown> | null;
-  /** Reason the session entered a terminal state, if any. */
-  terminalReason: string | null;
-}
-export type SessionId = string;
+export { SessionStateSchema };
+export type { SessionState, Session, SessionId, ToolInvocationRecord } from './types.js';
+export {
+  InMemoryControlPlaneRepository,
+  JsonFileControlPlaneRepository,
+  loadControlPlaneRepositoryState,
+  type CapabilityCheckOutcome,
+  type ControlPlaneRepository,
+  type ControlPlaneRepositoryState,
+  type ControlPlaneTask,
+  type ControlPlaneTaskState,
+} from './repository.js';
 
 /* ----------------------------- Tool gateway ------------------------------ */
 
@@ -136,6 +131,9 @@ export class ControlPlaneError extends Error {
       | 'agent_card_hash_mismatch'
       | 'invalid_input'
       | 'tool_not_found'
+      | 'task_not_found'
+      | 'task_not_claimed'
+      | 'task_already_terminal'
       | 'internal',
     message: string,
   ) {
@@ -202,21 +200,64 @@ export interface ControlPlaneOptions {
   audit: AuditLog;
   cards: AgentCardRegistry;
   toolGateway?: ToolGateway;
+  repository?: ControlPlaneRepository;
   /** Hook for real session-runtime integration in Phase 1. */
   clock?: () => Date;
+}
+
+export interface EnqueueTaskInput {
+  sessionId: string;
+  tool: string;
+  arguments: Record<string, unknown>;
+  createdBy: Actor;
+  auditCorrelationId?: string;
+  capabilityCheck: CapabilityCheckOutcome;
+  maxAttempts?: number;
+  scheduledAt?: string;
+}
+
+export interface ClaimTaskInput {
+  workerId: string;
+  leaseMs: number;
+}
+
+export interface TaskLeaseInput {
+  workerId: string;
+  leaseMs: number;
+}
+
+export interface CompleteTaskInput {
+  workerId: string;
+  result: Record<string, unknown>;
+}
+
+export interface FailTaskInput {
+  workerId: string;
+  error: string;
+  retryDelayMs?: number;
+}
+
+export interface CancelTaskInput {
+  reason: string;
+  actor: Actor;
+}
+
+export interface ClaimTaskResult {
+  task: ControlPlaneTask;
 }
 
 export class ControlPlane {
   private readonly audit: AuditLog;
   private readonly cards: AgentCardRegistry;
   private readonly toolGateway: ToolGateway;
-  private readonly sessions = new Map<SessionId, Session>();
+  private readonly repository: ControlPlaneRepository;
   private readonly clock: () => Date;
 
   constructor(opts: ControlPlaneOptions) {
     this.audit = opts.audit;
     this.cards = opts.cards;
     this.toolGateway = opts.toolGateway ?? stubToolGateway;
+    this.repository = opts.repository ?? new InMemoryControlPlaneRepository();
     this.clock = opts.clock ?? (() => new Date());
   }
 
@@ -272,7 +313,7 @@ export class ControlPlane {
       result: null,
       terminalReason: null,
     };
-    this.sessions.set(session.id, session);
+    await this.repository.saveSession(session);
 
     await this.audit.append({
       actor: { id: input.createdBy.id, type: input.createdBy.type },
@@ -289,7 +330,7 @@ export class ControlPlane {
   }
 
   getSession(id: SessionId): Session {
-    const s = this.sessions.get(id);
+    const s = this.repository.getSession(id);
     if (!s) {
       throw new ControlPlaneError('session_not_found', `session "${id}" not found`);
     }
@@ -304,7 +345,8 @@ export class ControlPlane {
       session.terminalReason = 'deleted by caller';
       session.updatedAt = this.clock().toISOString();
     }
-    this.sessions.delete(id);
+    await this.repository.saveSession(session);
+    await this.repository.deleteSession(id);
     await this.audit.append({
       actor: { id: 'system:control-plane', type: 'system' },
       action: 'session.delete',
@@ -335,6 +377,7 @@ export class ControlPlane {
     const result = await this.toolGateway(session, invocation);
 
     session.updatedAt = this.clock().toISOString();
+    await this.repository.saveSession(session);
 
     await this.audit.append({
       actor: { id: `agent:${session.agentId}`, type: 'agent' },
@@ -347,6 +390,19 @@ export class ControlPlane {
         correlationId: result.correlationId,
         error: result.error,
       },
+    });
+    await this.repository.saveToolInvocation({
+      id: randomUUID(),
+      sessionId: session.id,
+      tool: toolName,
+      arguments: invocation.arguments,
+      ok: result.ok,
+      result: result.result,
+      error: result.error,
+      durationMs: result.durationMs,
+      correlationId: result.correlationId,
+      createdAt: session.updatedAt,
+      auditCorrelationId: result.correlationId,
     });
 
     return result;
@@ -368,6 +424,7 @@ export class ControlPlane {
     session.state = 'killed';
     session.terminalReason = reason;
     session.updatedAt = this.clock().toISOString();
+    await this.repository.saveSession(session);
 
     await this.audit.append({
       actor: { id: 'system:control-plane', type: 'system' },
@@ -395,7 +452,225 @@ export class ControlPlane {
 
   /** Used by tests and the orchestrator to enumerate sessions. */
   listSessions(): Session[] {
-    return [...this.sessions.values()];
+    return this.repository.listSessions();
+  }
+
+  /* ------------------------- Scheduler lifecycle ------------------------ */
+
+  async enqueueTask(input: EnqueueTaskInput): Promise<ControlPlaneTask> {
+    this.getSession(input.sessionId);
+    if (!input.tool) {
+      throw new ControlPlaneError('invalid_input', 'task tool is required');
+    }
+    const now = this.clock().toISOString();
+    const task: ControlPlaneTask = {
+      id: randomUUID(),
+      sessionId: input.sessionId,
+      tool: input.tool,
+      arguments: input.arguments,
+      state: 'queued',
+      createdAt: now,
+      updatedAt: now,
+      scheduledAt: input.scheduledAt ?? now,
+      claimedAt: null,
+      claimedBy: null,
+      leaseExpiresAt: null,
+      attempt: 0,
+      maxAttempts: input.maxAttempts ?? 3,
+      result: null,
+      terminalReason: null,
+      createdBy: input.createdBy,
+      auditCorrelationId: input.auditCorrelationId ?? randomUUID(),
+      capabilityCheck: input.capabilityCheck,
+    };
+    await this.repository.saveTask(task);
+    await this.auditTask('task.enqueue', task, input.createdBy, {
+      tool: task.tool,
+      capabilityCheck: task.capabilityCheck,
+    });
+    return task;
+  }
+
+  async claimTask(input: ClaimTaskInput): Promise<ClaimTaskResult | null> {
+    const now = this.clock();
+    const nowIso = now.toISOString();
+    const task = this.repository
+      .listTasks()
+      .filter((candidate) => candidate.state === 'queued')
+      .filter((candidate) => Date.parse(candidate.scheduledAt) <= now.getTime())
+      .sort((a, b) => Date.parse(a.scheduledAt) - Date.parse(b.scheduledAt))[0];
+    if (!task) return null;
+
+    task.state = 'claimed';
+    task.claimedAt = nowIso;
+    task.claimedBy = input.workerId;
+    task.leaseExpiresAt = new Date(now.getTime() + input.leaseMs).toISOString();
+    task.updatedAt = nowIso;
+    task.attempt += 1;
+    await this.repository.saveTask(task);
+    await this.auditTask('task.claim', task, { id: input.workerId, type: 'agent' }, {
+      leaseExpiresAt: task.leaseExpiresAt,
+      attempt: task.attempt,
+    });
+    return { task };
+  }
+
+  async heartbeatTask(taskId: string, input: TaskLeaseInput): Promise<ControlPlaneTask> {
+    const task = this.requireTask(taskId);
+    this.requireClaimedBy(task, input.workerId);
+    const now = this.clock();
+    task.leaseExpiresAt = new Date(now.getTime() + input.leaseMs).toISOString();
+    task.updatedAt = now.toISOString();
+    await this.repository.saveTask(task);
+    await this.auditTask('task.heartbeat', task, { id: input.workerId, type: 'agent' }, {
+      leaseExpiresAt: task.leaseExpiresAt,
+    });
+    return task;
+  }
+
+  async completeTask(taskId: string, input: CompleteTaskInput): Promise<ControlPlaneTask> {
+    const task = this.requireTask(taskId);
+    this.requireClaimedBy(task, input.workerId);
+    const now = this.clock().toISOString();
+    task.state = 'completed';
+    task.result = input.result;
+    task.terminalReason = null;
+    task.updatedAt = now;
+    task.leaseExpiresAt = null;
+    await this.repository.saveTask(task);
+    await this.auditTask('task.complete', task, { id: input.workerId, type: 'agent' }, {
+      result: input.result,
+    });
+    return task;
+  }
+
+  async failTask(taskId: string, input: FailTaskInput): Promise<ControlPlaneTask> {
+    const task = this.requireTask(taskId);
+    this.requireClaimedBy(task, input.workerId);
+    const now = this.clock();
+    const nowIso = now.toISOString();
+    if (task.attempt >= task.maxAttempts) {
+      task.state = 'failed';
+      task.terminalReason = input.error;
+      task.leaseExpiresAt = null;
+      task.updatedAt = nowIso;
+      await this.repository.saveTask(task);
+      await this.auditTask('task.fail', task, { id: input.workerId, type: 'agent' }, {
+        error: input.error,
+        retry: false,
+      });
+      return task;
+    }
+
+    task.state = 'queued';
+    task.claimedAt = null;
+    task.claimedBy = null;
+    task.leaseExpiresAt = null;
+    task.scheduledAt = new Date(now.getTime() + (input.retryDelayMs ?? 0)).toISOString();
+    task.updatedAt = nowIso;
+    task.terminalReason = null;
+    await this.repository.saveTask(task);
+    await this.auditTask('task.retry', task, { id: input.workerId, type: 'agent' }, {
+      error: input.error,
+      scheduledAt: task.scheduledAt,
+    });
+    return task;
+  }
+
+  async cancelTask(taskId: string, input: CancelTaskInput): Promise<ControlPlaneTask> {
+    const task = this.requireTask(taskId);
+    this.assertNotTerminal(task);
+    const now = this.clock().toISOString();
+    task.state = 'cancelled';
+    task.terminalReason = input.reason;
+    task.updatedAt = now;
+    task.leaseExpiresAt = null;
+    await this.repository.saveTask(task);
+    await this.auditTask('task.cancel', task, input.actor, { reason: input.reason });
+    return task;
+  }
+
+  async recoverStuckTasks(): Promise<ControlPlaneTask[]> {
+    const now = this.clock();
+    const recovered: ControlPlaneTask[] = [];
+    for (const task of this.repository.listTasks()) {
+      if (
+        task.state !== 'claimed' ||
+        task.leaseExpiresAt === null ||
+        Date.parse(task.leaseExpiresAt) > now.getTime()
+      ) {
+        continue;
+      }
+      task.state = 'queued';
+      task.claimedAt = null;
+      task.claimedBy = null;
+      task.leaseExpiresAt = null;
+      task.updatedAt = now.toISOString();
+      task.scheduledAt = now.toISOString();
+      await this.repository.saveTask(task);
+      await this.auditTask('task.recover', task, { id: 'system:control-plane', type: 'system' }, {
+        reason: 'lease expired',
+      });
+      recovered.push(task);
+    }
+    return recovered;
+  }
+
+  getTask(taskId: string): ControlPlaneTask {
+    return this.requireTask(taskId);
+  }
+
+  listTasks(): ControlPlaneTask[] {
+    return this.repository.listTasks();
+  }
+
+  listToolInvocations(): ToolInvocationRecord[] {
+    return this.repository.listToolInvocations();
+  }
+
+  private requireTask(taskId: string): ControlPlaneTask {
+    const task = this.repository.getTask(taskId);
+    if (!task) {
+      throw new ControlPlaneError('task_not_found', `task "${taskId}" not found`);
+    }
+    return task;
+  }
+
+  private requireClaimedBy(task: ControlPlaneTask, workerId: string): void {
+    if (task.state !== 'claimed' || task.claimedBy !== workerId) {
+      throw new ControlPlaneError(
+        'task_not_claimed',
+        `task "${task.id}" is not claimed by "${workerId}"`,
+      );
+    }
+  }
+
+  private assertNotTerminal(task: ControlPlaneTask): void {
+    if (task.state === 'completed' || task.state === 'failed' || task.state === 'cancelled') {
+      throw new ControlPlaneError(
+        'task_already_terminal',
+        `task "${task.id}" already terminal (${task.state})`,
+      );
+    }
+  }
+
+  private async auditTask(
+    action: AuditAppendInput['action'],
+    task: ControlPlaneTask,
+    actor: Actor,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    await this.audit.append({
+      actor,
+      action,
+      resource: { kind: 'task', id: task.id },
+      data: {
+        ...data,
+        sessionId: task.sessionId,
+        auditCorrelationId: task.auditCorrelationId,
+        state: task.state,
+      },
+    });
   }
 }
 

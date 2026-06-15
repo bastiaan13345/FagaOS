@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { createControlPlaneServer, createSampleCard } from '../src/bootstrap.js';
 
 describe('control-plane server bootstrap', () => {
@@ -27,6 +30,28 @@ describe('control-plane server bootstrap', () => {
       expect(res.status).toBe(200);
     } finally {
       close();
+    }
+  });
+
+  it('uses the configured durable state file across bootstrap restarts', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'fagaos-server-state-'));
+    try {
+      const stateFile = join(dir, 'control-plane.json');
+      const first = createControlPlaneServer({ host: '127.0.0.1', port: 0, stateFile });
+      const session = await first.controlPlane.createSession({
+        agentId: 'agent.sample.echo',
+        createdBy: { id: 'system:test', type: 'system' },
+        input: { prompt: 'persist' },
+      });
+
+      const second = createControlPlaneServer({ host: '127.0.0.1', port: 0, stateFile });
+
+      expect(second.controlPlane.getSession(session.id)).toMatchObject({
+        id: session.id,
+        input: { prompt: 'persist' },
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   });
 });

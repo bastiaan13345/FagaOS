@@ -24,6 +24,8 @@ servers:
 tags:
   - name: sessions
     description: Session lifecycle (create, inspect, tear down, kill, log).
+  - name: tasks
+    description: Durable scheduler task lifecycle.
   - name: tools
     description: Tool invocation through the sandbox gateway.
   - name: cards
@@ -187,6 +189,195 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Ok" }
 
+  /tasks:
+    post:
+      tags: [tasks]
+      summary: Enqueue a durable scheduler task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EnqueueTaskRequest" }
+      responses:
+        "200":
+          description: Task enqueued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [task]
+                properties:
+                  task: { $ref: "#/components/schemas/Task" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tasks/claim:
+    post:
+      tags: [tasks]
+      summary: Claim the next runnable task and attach a worker lease
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClaimTaskRequest" }
+      responses:
+        "200":
+          description: Claim result; null when no task is runnable
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [claim]
+                properties:
+                  claim:
+                    nullable: true
+                    type: object
+                    required: [task]
+                    properties:
+                      task: { $ref: "#/components/schemas/Task" }
+
+  /tasks/recover:
+    post:
+      tags: [tasks]
+      summary: Requeue tasks whose worker leases have expired
+      responses:
+        "200":
+          description: Recovered tasks
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tasks]
+                properties:
+                  tasks:
+                    type: array
+                    items: { $ref: "#/components/schemas/Task" }
+
+  /tasks/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string }
+    get:
+      tags: [tasks]
+      summary: Inspect a task
+      responses:
+        "200":
+          description: Task details
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [task]
+                properties:
+                  task: { $ref: "#/components/schemas/Task" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tasks/{id}/heartbeat:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string }
+    post:
+      tags: [tasks]
+      summary: Extend the lease for a claimed task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClaimTaskRequest" }
+      responses:
+        "200":
+          description: Task heartbeat accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [task]
+                properties:
+                  task: { $ref: "#/components/schemas/Task" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /tasks/{id}/complete:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string }
+    post:
+      tags: [tasks]
+      summary: Mark a claimed task complete
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CompleteTaskRequest" }
+      responses:
+        "200":
+          description: Task completed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [task]
+                properties:
+                  task: { $ref: "#/components/schemas/Task" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /tasks/{id}/fail:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string }
+    post:
+      tags: [tasks]
+      summary: Fail a claimed task, retrying until maxAttempts is reached
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FailTaskRequest" }
+      responses:
+        "200":
+          description: Task requeued or terminally failed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [task]
+                properties:
+                  task: { $ref: "#/components/schemas/Task" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /tasks/{id}/cancel:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string }
+    post:
+      tags: [tasks]
+      summary: Cancel a queued or claimed task
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CancelTaskRequest" }
+      responses:
+        "200":
+          description: Task cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [task]
+                properties:
+                  task: { $ref: "#/components/schemas/Task" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
 components:
   responses:
     BadRequest:
@@ -244,6 +435,66 @@ components:
       type: object
       properties:
         reason: { type: string, default: "killed by caller" }
+    EnqueueTaskRequest:
+      type: object
+      required: [sessionId, tool, createdBy, capabilityCheck]
+      properties:
+        sessionId: { type: string }
+        tool: { type: string }
+        arguments:
+          type: object
+          additionalProperties: true
+          default: {}
+        createdBy:
+          type: object
+          required: [id, type]
+          properties:
+            id: { type: string }
+            type: { type: string, enum: [user, agent, system] }
+        auditCorrelationId: { type: string }
+        maxAttempts: { type: integer, minimum: 1, default: 3 }
+        scheduledAt: { type: string, format: date-time }
+        capabilityCheck:
+          $ref: "#/components/schemas/CapabilityCheck"
+    ClaimTaskRequest:
+      type: object
+      required: [workerId, leaseMs]
+      properties:
+        workerId: { type: string }
+        leaseMs: { type: integer, minimum: 1 }
+    CompleteTaskRequest:
+      type: object
+      required: [workerId]
+      properties:
+        workerId: { type: string }
+        result:
+          type: object
+          additionalProperties: true
+          default: {}
+    FailTaskRequest:
+      type: object
+      required: [workerId, error]
+      properties:
+        workerId: { type: string }
+        error: { type: string }
+        retryDelayMs: { type: integer, minimum: 0, default: 0 }
+    CancelTaskRequest:
+      type: object
+      properties:
+        reason: { type: string, default: "cancelled by caller" }
+        actor:
+          type: object
+          required: [id, type]
+          properties:
+            id: { type: string }
+            type: { type: string, enum: [user, agent, system] }
+    CapabilityCheck:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean }
+        policyId: { type: string }
+        reason: { type: string }
     Session:
       type: object
       required:
@@ -283,6 +534,64 @@ components:
         terminalReason:
           type: string
           nullable: true
+    Task:
+      type: object
+      required:
+        - id
+        - sessionId
+        - tool
+        - arguments
+        - state
+        - createdAt
+        - updatedAt
+        - scheduledAt
+        - attempt
+        - maxAttempts
+        - createdBy
+        - auditCorrelationId
+        - capabilityCheck
+      properties:
+        id: { type: string, format: uuid }
+        sessionId: { type: string }
+        tool: { type: string }
+        arguments:
+          type: object
+          additionalProperties: true
+        state:
+          type: string
+          enum: [queued, claimed, completed, failed, cancelled]
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        scheduledAt: { type: string, format: date-time }
+        claimedAt:
+          type: string
+          format: date-time
+          nullable: true
+        claimedBy:
+          type: string
+          nullable: true
+        leaseExpiresAt:
+          type: string
+          format: date-time
+          nullable: true
+        attempt: { type: integer, minimum: 0 }
+        maxAttempts: { type: integer, minimum: 1 }
+        result:
+          type: object
+          nullable: true
+          additionalProperties: true
+        terminalReason:
+          type: string
+          nullable: true
+        createdBy:
+          type: object
+          required: [id, type]
+          properties:
+            id: { type: string }
+            type: { type: string, enum: [user, agent, system] }
+        auditCorrelationId: { type: string }
+        capabilityCheck:
+          $ref: "#/components/schemas/CapabilityCheck"
     ToolResult:
       type: object
       required: [ok, durationMs, correlationId]

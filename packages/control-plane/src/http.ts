@@ -110,6 +110,120 @@ function buildRoutes(opts: HttpServerOptions): Route[] {
   });
 
   r.push({
+    method: 'POST',
+    pattern: /^\/tasks$/,
+    paramNames: [],
+    handler: async (_p, body) => {
+      const b = body as {
+        sessionId: string;
+        tool: string;
+        arguments?: Record<string, unknown>;
+        createdBy: { id: string; type: 'user' | 'agent' | 'system' };
+        auditCorrelationId?: string;
+        capabilityCheck: { ok: boolean; policyId?: string; reason?: string };
+        maxAttempts?: number;
+        scheduledAt?: string;
+      };
+      const task = await cp.enqueueTask({
+        sessionId: b.sessionId,
+        tool: b.tool,
+        arguments: b.arguments ?? {},
+        createdBy: b.createdBy,
+        capabilityCheck: b.capabilityCheck,
+        ...(b.auditCorrelationId !== undefined ? { auditCorrelationId: b.auditCorrelationId } : {}),
+        ...(b.maxAttempts !== undefined ? { maxAttempts: b.maxAttempts } : {}),
+        ...(b.scheduledAt !== undefined ? { scheduledAt: b.scheduledAt } : {}),
+      });
+      return { task };
+    },
+  });
+
+  r.push({
+    method: 'POST',
+    pattern: /^\/tasks\/claim$/,
+    paramNames: [],
+    handler: async (_p, body) => {
+      const b = body as { workerId: string; leaseMs: number };
+      const claim = await cp.claimTask({ workerId: b.workerId, leaseMs: b.leaseMs });
+      return { claim };
+    },
+  });
+
+  r.push({
+    method: 'GET',
+    pattern: /^\/tasks\/([^/]+)$/,
+    paramNames: ['id'],
+    handler: async (p) => ({ task: cp.getTask(p['id']!) }) as unknown,
+  });
+
+  r.push({
+    method: 'POST',
+    pattern: /^\/tasks\/([^/]+)\/heartbeat$/,
+    paramNames: ['id'],
+    handler: async (p, body) => {
+      const b = body as { workerId: string; leaseMs: number };
+      const task = await cp.heartbeatTask(p['id']!, { workerId: b.workerId, leaseMs: b.leaseMs });
+      return { task };
+    },
+  });
+
+  r.push({
+    method: 'POST',
+    pattern: /^\/tasks\/([^/]+)\/complete$/,
+    paramNames: ['id'],
+    handler: async (p, body) => {
+      const b = body as { workerId: string; result?: Record<string, unknown> };
+      const task = await cp.completeTask(p['id']!, {
+        workerId: b.workerId,
+        result: b.result ?? {},
+      });
+      return { task };
+    },
+  });
+
+  r.push({
+    method: 'POST',
+    pattern: /^\/tasks\/([^/]+)\/fail$/,
+    paramNames: ['id'],
+    handler: async (p, body) => {
+      const b = body as { workerId: string; error: string; retryDelayMs?: number };
+      const task = await cp.failTask(p['id']!, {
+        workerId: b.workerId,
+        error: b.error,
+        ...(b.retryDelayMs !== undefined ? { retryDelayMs: b.retryDelayMs } : {}),
+      });
+      return { task };
+    },
+  });
+
+  r.push({
+    method: 'POST',
+    pattern: /^\/tasks\/([^/]+)\/cancel$/,
+    paramNames: ['id'],
+    handler: async (p, body) => {
+      const b = body as {
+        reason?: string;
+        actor?: { id: string; type: 'user' | 'agent' | 'system' };
+      };
+      const task = await cp.cancelTask(p['id']!, {
+        reason: b.reason ?? 'cancelled by caller',
+        actor: b.actor ?? { id: 'system:control-plane', type: 'system' },
+      });
+      return { task };
+    },
+  });
+
+  r.push({
+    method: 'POST',
+    pattern: /^\/tasks\/recover$/,
+    paramNames: [],
+    handler: async () => {
+      const tasks = await cp.recoverStuckTasks();
+      return { tasks };
+    },
+  });
+
+  r.push({
     method: 'GET',
     pattern: /^\/sessions\/([^/]+)\/log$/,
     paramNames: ['id'],
@@ -223,7 +337,7 @@ export function createHttpServer(opts: HttpServerOptions): FagaosHttpServer {
     } catch (e) {
       if (e instanceof ControlPlaneError) {
         const status =
-          e.code === 'session_not_found' ? 404
+          e.code === 'session_not_found' || e.code === 'task_not_found' ? 404
           : e.code === 'invalid_input' ? 400
           : 409;
         json(res, status, { error: e.code, message: e.message });

@@ -140,6 +140,22 @@ npm run build
 Each package compiles to its own `dist/`. There is no bundler step in
 v0.
 
+### Run the control-plane server with durable local state
+
+The control-plane server defaults to in-memory state. For local restart
+persistence of sessions, scheduler tasks, and tool invocation records,
+set a state file:
+
+```bash
+FAGAOS_CONTROL_PLANE_STATE_FILE=.fagaos/control-plane-state.json \
+  npm run dev --workspace @fagaos/control-plane-server
+```
+
+The file-backed backend is the local development implementation behind
+the `ControlPlaneRepository` interface. See
+[`docs/control-plane-state.md`](docs/control-plane-state.md) for the
+storage model and scheduler lifecycle semantics.
+
 ## The audit log primitive
 
 A quick tour of the API. For full details, see
@@ -227,8 +243,10 @@ Per the FAG-8 issue body and the architecture doc:
   in the FAG-4 deliverable.
 - **Policy engine binding.** The `@fagaos/policy` package ships the
   contract. Phase 1 will bind to Cedar.
-- **Orchestrator, scheduler, capability broker.** These land in
-  Phase 1–2 per the architecture doc's §12 roadmap.
+- **Full orchestrator and capability broker.** The control-plane now
+  includes durable session/task storage and scheduler lifecycle state;
+  full orchestration and policy-backed capability minting still land
+  in later phases per the architecture doc's §12 roadmap.
 
 ## Contributing
 
