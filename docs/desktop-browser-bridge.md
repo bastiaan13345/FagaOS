@@ -1,10 +1,20 @@
-# Desktop and Browser Bridge PoC
+# Desktop and Browser Bridge Runtime
 
-FAG-15 turns the Phase 0 desktop bridge placeholder into an executable local
-proof of concept. The package is intentionally deterministic: it models the
-session, capability, audit, sandbox, and browser-navigation contracts without
-performing real OS-level input injection or launching a production browser
-worker.
+FAG-26 turns the FAG-15 proof of concept into the first production-capable
+desktop/browser bridge boundary. The bridge remains transport-neutral: callers
+use one `DesktopBridge` contract while runtime adapters own local OS commands,
+browser transports, and optional remote worker leases.
+
+The first supported target set is:
+
+- `linux-x11-cdp` for local Linux hosts using X11 command-line primitives plus
+  Chrome DevTools Protocol.
+- `macos-xctest-cdp` and `windows-uia-cdp` as explicit adapter targets with the
+  same contract. They are not implemented by the default host adapter yet; calls
+  fail closed until platform-specific command runners are bound.
+
+This keeps the production path focused on desktop/browser runtime mechanics and
+does not expand into product UI or cloud autoscaling.
 
 ## Package
 
@@ -13,12 +23,22 @@ transport-neutral `DesktopBridge` interface plus a local deterministic
 implementation:
 
 - `LocalDesktopBridge` manages session lifecycle, sandbox directories, timeout
-  cleanup, clipboard state, desktop command validation, and browser navigation.
+  cleanup, capability checks, audit correlation, desktop command validation,
+  drop-folder file exchange, browser navigation, inspection streams, and remote
+  worker lease hooks.
 - `CapabilityVerifier` is the authorization hook. FAG-13 can replace the local
   allow-list verifier with the policy engine adapter without changing callers.
 - `NetworkPolicy` is deny-by-default. Tests opt in to specific URLs to prove
   the hook is enforced before browser adapter dispatch.
-- `BrowserAdapter` isolates browser automation behind the bridge.
+- `DesktopRuntimeAdapter` isolates screenshot, mouse, keyboard, and clipboard
+  operations. If no adapter is supplied, deterministic local behavior remains
+  available for tests.
+- `BrowserAdapter` isolates browser profile lifecycle, navigation, inspection,
+  and streaming hooks behind the bridge.
+- `RemoteWorkerProvisioner` is the lifecycle seam for a future scheduler or
+  worker pool. It can provision and release a lease per session, but the bridge
+  does not autoscale workers itself.
+
   `StubBrowserAdapter` returns deterministic navigation results and is the
   default for local tests. `ChromeDevToolsBrowserAdapter` is the CDP-shaped
   skeleton for future real browser workers.
@@ -39,15 +59,21 @@ testing. Bridge file operations resolve paths under `drop/` and reject traversal
 outside that folder. Termination and timeout cleanup remove the full
 per-session directory.
 
-The PoC does not claim a hard OS sandbox. Production adapters must still run
-under the FAG-4 isolation model: separate OS user, constrained desktop session,
-portal or native accessibility backend, and explicit human takeover controls.
+Runtime adapters must still run under the FAG-4 isolation model: separate OS
+user or equivalent worker identity, constrained desktop session, portal or
+native accessibility backend, default-deny network policy, and explicit teardown.
+The bridge enforces path containment and cleanup; host isolation remains the
+adapter or worker supervisor's job.
 
 ## Capabilities and Audit
 
 Every bridge action passes through `CapabilityVerifier` before touching session
-state or adapters. Denials are recorded in the append-only audit log with a
-`deny` outcome and then surfaced as `CapabilityDeniedError`.
+state or adapters. `auditCorrelationId` is forwarded to capability resource
+context and audit payloads so FAG-21 tool invocation records can correlate with
+FAG-13 policy decisions and bridge runtime events.
+
+Denials are recorded in the append-only audit log with a `deny` outcome and then
+surfaced as `CapabilityDeniedError`.
 
 Successful actions and boundary denials append `desktopBridge.*` audit events
 against the `desktopBridge.session` resource. The PoC uses the existing
@@ -56,6 +82,7 @@ against the `desktopBridge.session` resource. The PoC uses the existing
 Current operations:
 
 - `session.create`, `session.inspect`, `session.terminate`
+- `session.stream.open`
 - `screenshot.capture`
 - `mouse.click`
 - `keyboard.type`
@@ -63,7 +90,23 @@ Current operations:
 - `browser.navigate`
 - `file.readDrop`, `file.writeDrop`
 
-## Browser Adapter
+## Runtime Adapters
+
+`createHostDesktopAdapter({ target: 'linux-x11-cdp', commandRunner })` maps the
+first Linux target onto injected host commands:
+
+- screenshot: `import -window root png:-`
+- mouse: `xdotool mousemove <x> <y> click <button>`
+- keyboard: `xdotool type --clearmodifiers <text>`
+- clipboard: `xclip -selection clipboard`
+
+The adapter accepts a command runner instead of spawning processes directly. That
+keeps process execution, worker transport, and privilege boundaries outside the
+bridge package while still giving production code a real OS-level dispatch path.
+Unsupported platform targets return an adapter that fails closed until their
+native runners are implemented.
+
+## Browser Runtime
 
 `navigateBrowser()` validates the session, checks the capability, parses the
 URL, asks `NetworkPolicy`, and only then calls `BrowserAdapter.navigate()`.
@@ -82,6 +125,18 @@ and currently drives the minimal CDP sequence: `Page.enable`, `Page.navigate`,
 and `Runtime.evaluate` for `document.title`. This keeps tests stable while
 preserving the future adapter path for Playwright, Chrome DevTools Protocol,
 Linux portal, macOS XCTest, Windows UIA, or remote worker implementations.
+
+Browser adapters may also implement:
+
+- `createSession()` to launch or bind a per-session browser profile.
+- `inspectSession()` to expose endpoint/profile/stream availability.
+- `openInspectionStream()` to provide a supervised live stream URL.
+- `teardownSession()` to close browser processes before the profile directory is
+  removed.
+
+Human takeover is represented by inspection and stream hooks only in this
+package. Product UI, approval workflows, and operator controls remain deferred to
+the supervising layer because FAG-26 is scoped to bridge runtime mechanics.
 
 ## Local Run Instructions
 
@@ -106,13 +161,15 @@ npm run verify
 The focused tests cover session lifecycle, permission denial, audit logging,
 deterministic screenshot capture, keyboard and mouse validation, clipboard
 round-trip, browser navigation through the stub and CDP skeleton adapters,
-deny-by-default network behavior, drop-folder containment, timeout cleanup, and
-teardown cleanup.
+deny-by-default network behavior, drop-folder containment, timeout cleanup,
+teardown cleanup, injected desktop runtime dispatch, browser inspection streams,
+remote worker provision/release seams, audit correlation propagation, and Linux
+host command mapping.
 
 ## Out of Scope
 
-- Real VNC/noVNC streaming.
-- Real OS input injection.
-- Cloud worker provisioning.
-- Human takeover UI.
-- Full policy engine integration before FAG-13 lands.
+- Product UI or human takeover UI.
+- Cloud autoscaling or worker pool ownership.
+- Direct process spawning inside the bridge package.
+- macOS XCTest and Windows UIA command runners until those platform adapters are
+  bound.
