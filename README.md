@@ -74,8 +74,10 @@ fagaos/
 │   ├── runtime/           @fagaos/runtime   sandboxed execution plane (WASM, seccomp, gVisor)
 │   ├── connectors/        @fagaos/connectors  Gmail / WhatsApp / Calendar contracts
 │   └── desktop-bridge/    @fagaos/desktop-bridge  sandboxed desktop/browser control
-├── docs/                  architecture, risk register, QA strategy
-├── .github/workflows/     CI (lint, typecheck, tests, coverage gate)
+├── apps/
+│   └── control-plane-server/  @fagaos/control-plane-server deployable HTTP server
+├── docs/                  architecture, release flow, risk register, QA strategy
+├── .github/workflows/     CI (lint, typecheck, tests, coverage and packaging gates)
 ├── package.json           workspaces manifest + scripts
 ├── tsconfig.json          shared strict TS config
 ├── vitest.config.ts       test runner + coverage thresholds
@@ -112,8 +114,8 @@ npm run test:coverage   # with coverage report
 npm run verify
 ```
 
-This runs lint, typecheck, and the test suite with the coverage gate
-enforced. The gate is:
+This runs lint, typecheck, the test suite with the coverage gate, and
+deployment packaging verification. The coverage gate is:
 
 - ≥ 90% line coverage on `packages/core/src/audit/**` (the critical
   path — see the QA strategy)
@@ -139,6 +141,19 @@ npm run build
 
 Each package compiles to its own `dist/`. There is no bundler step in
 v0.
+
+### Verify deployment packaging
+
+```bash
+npm run package:verify
+```
+
+This rebuilds the workspaces and validates the deployable manifests for
+`@fagaos/control-plane-server` and `@fagaos/runtime`. It fails if a
+deployable package is missing its built entrypoint, package metadata, or
+local `@fagaos/*` dependency package. See
+[`docs/release-flow.md`](docs/release-flow.md) for the PR, release, and
+packaging policy.
 
 ### Run the control-plane server with durable local state
 
@@ -268,8 +283,10 @@ Per the FAG-8 issue body and the architecture doc:
 6. **Conventional commits.** `feat:`, `fix:`, `refactor:`,
    `test:`, `docs:`, `chore:`. The audit log is sacred — if your
    change touches it, prefix with `security(audit):`.
-7. **Open a PR.** CI runs the verify suite. Reviewers check the
-   threat model in `docs/risk-assessment.md` against your diff.
+7. **Open a PR.** CI runs the verify suite and packaging gate. Reviewers
+   check the threat model in `docs/risk-assessment.md` against your diff.
+   The branch, merge, and release-tag policy is in
+   [`docs/release-flow.md`](docs/release-flow.md).
 
 ## Useful references
 
@@ -279,6 +296,8 @@ Per the FAG-8 issue body and the architecture doc:
   risk register with mitigations
 - [`docs/qa-strategy.md`](docs/qa-strategy.md) — quality gates and
   test pyramid that drive the coverage thresholds
+- [`docs/release-flow.md`](docs/release-flow.md) — trunk strategy, PR
+  policy, release tags, and deployment packaging verification
 - FAG-6 (core platform architecture) — completed
 - FAG-7 (QA strategy) — completed
 - FAG-8 (this phase) — in review

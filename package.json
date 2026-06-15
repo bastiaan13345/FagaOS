@@ -11,14 +11,15 @@
   "scripts": {
     "build": "npm run -ws --if-present build",
     "build:schema": "npm run -ws --if-present build:schema",
-    "lint": "eslint --no-error-on-unmatched-pattern \"packages/*/src/**/*.ts\" \"packages/*/tests/**/*.ts\" \"apps/*/src/**/*.ts\" \"apps/*/tests/**/*.ts\"",
+    "lint": "eslint --no-error-on-unmatched-pattern \"packages/*/src/**/*.ts\" \"packages/*/tests/**/*.ts\" \"apps/*/src/**/*.ts\" \"apps/*/tests/**/*.ts\" \"scripts/**/*.ts\"",
     "typecheck": "tsc -b",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "package:verify": "npm run build && tsx scripts/verify-packaging.ts",
     "audit:dependencies": "npm audit --audit-level=high",
     "release:gate": "tsx scripts/release-gate.ts",
-    "verify": "npm run lint && npm run typecheck && npm run build && npm run test:coverage && npm run audit:dependencies && npm run release:gate"
+    "verify": "npm run lint && npm run typecheck && npm run build && npm run package:verify && npm run test:coverage && npm run audit:dependencies && npm run release:gate"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
