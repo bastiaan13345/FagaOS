@@ -1,0 +1,32 @@
+export {
+  createDefaultReleaseGatePlan,
+  evaluateAuditTriage,
+  evaluateDependencyAudit,
+  evaluateProviderContracts,
+  evaluateReleaseGate,
+  evaluateRuntimeScenarios,
+  evaluateThreatCoverage,
+} from './gates.js';
+
+export type {
+  AuditTriageInput,
+  AuditTriageReport,
+  DependencyAuditFinding,
+  DependencyAuditReport,
+  DependencyDecision,
+  DependencySeverity,
+  DependencySurface,
+  FlakyTestTriage,
+  GatePolicy,
+  GateSectionReport,
+  ProviderContractTarget,
+  ReleaseGateInput,
+  ReleaseGatePlan,
+  ReleaseGateReport,
+  ReleaseGateStatus,
+  RuntimeScenarioTarget,
+  TargetStatus,
+  ThreatCoverageItem,
+  ThreatCoverageStatus,
+  VulnerabilityDecision,
+} from './types.js';

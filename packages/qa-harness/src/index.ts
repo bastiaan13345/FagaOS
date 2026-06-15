@@ -12,6 +12,8 @@
  *                                 injection, sandbox escape, and exfiltration.
  *   - `fixtures` (./fixtures)   — Mock providers for Gmail/Graph push,
  *                                 Meta, Telegram, and Discord.
+ *   - `release-gates`           — Release readiness policy, prereq tracking,
+ *                                 and JSON reporting for Phase 2 QA.
  *
  * The package is Phase 1 (FAG-12) scope. It is not the full
  * desktop/browser automation harness — that lands under FAG-4.
@@ -35,3 +37,21 @@ export { ConnectorContractSuite, defineCheck } from './contracts/suite.js';
 export type { AdversarialCase, AdversarialCategory, AdversarialVerdict } from './corpus/types.js';
 export { AdversarialCorpus, seedCorpus } from './corpus/corpus.js';
 export { defaultSeedCases } from './corpus/seed.js';
+export {
+  createDefaultReleaseGatePlan,
+  evaluateAuditTriage,
+  evaluateDependencyAudit,
+  evaluateProviderContracts,
+  evaluateReleaseGate,
+  evaluateRuntimeScenarios,
+  evaluateThreatCoverage,
+} from './release-gates/index.js';
+export type {
+  AuditTriageInput,
+  DependencyAuditFinding,
+  GatePolicy,
+  ProviderContractTarget,
+  ReleaseGateReport,
+  RuntimeScenarioTarget,
+  ThreatCoverageItem,
+} from './release-gates/index.js';

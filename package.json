@@ -16,7 +16,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "verify": "npm run lint && npm run typecheck && npm run test:coverage"
+    "audit:dependencies": "npm audit --audit-level=high",
+    "release:gate": "tsx scripts/release-gate.ts",
+    "verify": "npm run lint && npm run typecheck && npm run build && npm run test:coverage && npm run audit:dependencies && npm run release:gate"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

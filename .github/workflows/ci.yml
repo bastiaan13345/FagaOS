@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   test:
-    name: lint / typecheck / unit tests / coverage
+    name: lint / typecheck / unit tests / coverage / release gate
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -26,14 +26,8 @@ jobs:
       - name: Install dependencies
         run: npm ci || npm install
 
-      - name: Lint
-        run: npm run lint
-
-      - name: Type check
-        run: npm run typecheck
-
-      - name: Unit tests with coverage
-        run: npm run test:coverage
+      - name: Verify
+        run: npm run verify
 
       # Coverage gate matches the QA strategy in docs/qa-strategy.md:
       #   - >= 90% on the audit log primitive (critical path)
@@ -46,4 +40,12 @@ jobs:
         with:
           name: coverage-report
           path: coverage/
+          retention-days: 14
+
+      - name: Upload release gate report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-report
+          path: coverage/release-gate-report.json
           retention-days: 14
