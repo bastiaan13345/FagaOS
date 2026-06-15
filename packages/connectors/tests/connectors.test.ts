@@ -7,6 +7,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import {
+  ConnectorError,
   GmailConnector,
   GoogleCalendarConnector,
   type GoogleTokenProvider,
@@ -96,6 +97,13 @@ describe('GmailConnector — listMessages', () => {
         {} as never,
       ),
     ).rejects.toMatchObject({ code: 'forbidden' });
+  });
+});
+
+describe('ConnectorError', () => {
+  it('distinguishes connector errors from generic errors', () => {
+    expect(ConnectorError.isConnectorError(new ConnectorError('internal', 'test'))).toBe(true);
+    expect(ConnectorError.isConnectorError(new Error('test'))).toBe(false);
   });
 });
 

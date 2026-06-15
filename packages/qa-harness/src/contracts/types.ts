@@ -28,8 +28,6 @@
  * connectors and call into this suite.
  */
 
-import type { Connector } from '@fagaos/connectors';
-
 export interface ContractSuiteOptions {
   /** Human-readable connector id, used in result labels. */
   connectorId: string;

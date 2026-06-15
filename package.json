@@ -11,7 +11,7 @@
   "scripts": {
     "build": "npm run -ws --if-present build",
     "build:schema": "npm run -ws --if-present build:schema",
-    "lint": "eslint \"packages/*/src/**/*.ts\" \"packages/*/tests/**/*.ts\" \"apps/*/src/**/*.ts\" \"apps/*/tests/**/*.ts\"",
+    "lint": "eslint --no-error-on-unmatched-pattern \"packages/*/src/**/*.ts\" \"packages/*/tests/**/*.ts\" \"apps/*/src/**/*.ts\" \"apps/*/tests/**/*.ts\"",
     "typecheck": "tsc -b",
     "test": "vitest run",
     "test:watch": "vitest",

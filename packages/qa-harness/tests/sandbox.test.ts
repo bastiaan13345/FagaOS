@@ -5,7 +5,7 @@
  * bump it to 30 s in case the CI host is slow.
  */
 
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { SandboxHarness, isHostnameAllowed, SandboxTimeoutError, SandboxMemoryLimitError, SandboxNetworkDeniedError } from '../src/sandbox/index.js';
 
 describe('isHostnameAllowed', () => {
@@ -41,8 +41,8 @@ describe('SandboxHarness', () => {
   it('captures stdout and stderr', async () => {
     const res = await harness.run<void>(
       () => {
-        console.log('hello-from-stdout');
-        console.error('hello-from-stderr');
+        process.stdout.write('hello-from-stdout\n');
+        process.stderr.write('hello-from-stderr\n');
       },
       [],
       { timeoutMs: 5_000 },
@@ -78,7 +78,7 @@ describe('SandboxHarness', () => {
   }, 30_000);
 
   it('times out on an infinite loop', async () => {
-    const res = await harness.run<void>(() => { while (true) {} }, [], { timeoutMs: 250 });
+    const res = await harness.run<void>(() => { for (;;) { Math.random(); } }, [], { timeoutMs: 250 });
     expect(res.reason).toBe('timeout');
     expect(res.error?.name).toBe('SandboxTimeoutError');
   }, 30_000);
@@ -139,7 +139,7 @@ describe('SandboxHarness', () => {
     // The harness then reports 'protocol-error' with a descriptive
     // message.
     const res = await harness.run<void>(
-      () => { while (true) {} },
+      () => { for (;;) { Math.random(); } },
       [],
       { timeoutMs: 1 },
     );

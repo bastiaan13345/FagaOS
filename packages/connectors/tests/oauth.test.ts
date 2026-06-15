@@ -66,6 +66,34 @@ describe('Google token exchange', () => {
     ).rejects.toBeInstanceOf(ConnectorError);
   });
 
+  it('includes client secrets and tolerates unreadable error bodies', async () => {
+    const failingResponse = {
+      ok: false,
+      status: 500,
+      statusText: 'Server Error',
+      text: async () => {
+        throw new Error('body unavailable');
+      },
+    } as unknown as Response;
+    const fetchImpl = vi.fn(async () => failingResponse);
+    await expect(
+      exchangeAuthorizationCode(
+        {
+          token_endpoint: 'https://example.com/token',
+          client_id: 'cid',
+          client_secret: 'secret',
+          code: 'c',
+          redirect_uri: 'https://app/cb',
+          pkce: generatePkce(),
+        },
+        fetchImpl as unknown as typeof fetch,
+      ),
+    ).rejects.toMatchObject({ code: 'provider_error', cause: '' });
+
+    const init = fetchImpl.mock.calls[0]?.[1] as RequestInit;
+    expect(String(init.body)).toContain('client_secret=secret');
+  });
+
   it('refreshes a token', async () => {
     const fetchImpl = vi.fn(async () =>
       new Response(JSON.stringify({ access_token: 'a2', expires_in: 3600, token_type: 'Bearer' }), { status: 200 }),
@@ -79,5 +107,23 @@ describe('Google token exchange', () => {
       fetchImpl as unknown as typeof fetch,
     );
     expect(out.access_token).toBe('a2');
+  });
+
+  it('raises reauth_required when refresh fails and sends the optional client secret', async () => {
+    const fetchImpl = vi.fn(async () => new Response('invalid_grant', { status: 401, statusText: 'Unauthorized' }));
+    await expect(
+      exchangeRefreshToken(
+        {
+          token_endpoint: 'https://example.com/token',
+          client_id: 'cid',
+          client_secret: 'secret',
+          refresh_token: 'rt',
+        },
+        fetchImpl as unknown as typeof fetch,
+      ),
+    ).rejects.toMatchObject({ code: 'reauth_required', cause: 'invalid_grant' });
+
+    const init = fetchImpl.mock.calls[0]?.[1] as RequestInit;
+    expect(String(init.body)).toContain('client_secret=secret');
   });
 });

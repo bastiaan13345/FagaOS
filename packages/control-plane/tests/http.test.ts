@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { createHttpServer } from '../src/http.js';
-import { ControlPlane, createInMemoryCardRegistry } from '../src/index.js';
+import { ControlPlane, ControlPlaneError, createInMemoryCardRegistry } from '../src/index.js';
 import { createInMemoryAuditLog } from '@fagaos/audit-log';
 import type { z } from 'zod';
 import { AgentCardSchema } from '@fagaos/agent-manifest';
@@ -114,9 +114,75 @@ describe('@fagaos/control-plane HTTP transport', () => {
     expect(second.body.error).toBe('session_already_terminal');
   });
 
+  it('returns 400 for invalid JSON payloads', async () => {
+    const res = await fetch(base + '/sessions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{not-json',
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: 'invalid_json' });
+  });
+
+  it('returns 400 for domain invalid-input errors', async () => {
+    const audit = createInMemoryAuditLog();
+    const cards = createInMemoryCardRegistry();
+    const cp = new ControlPlane({ audit, cards });
+    cp.createSession = async () => {
+      throw new ControlPlaneError('invalid_input', 'agentId is required');
+    };
+    const server = createHttpServer({ controlPlane: cp });
+    const { port, close } = await server.listen(0);
+    try {
+      const r = await request(`http://127.0.0.1:${port}`, 'POST', '/sessions', {
+        agentId: '',
+        createdBy: { id: 'user:alice', type: 'user' },
+        input: {},
+      });
+      expect(r.status).toBe(400);
+      expect(r.body.error).toBe('invalid_input');
+    } finally {
+      close();
+    }
+  });
+
+  it('returns 500 for unexpected handler errors', async () => {
+    const audit = createInMemoryAuditLog();
+    const cards = createInMemoryCardRegistry();
+    const cp = new ControlPlane({ audit, cards });
+    const original = cp.registerCard.bind(cp);
+    cp.registerCard = async (...args) => {
+      await original(...args);
+      throw new Error('unexpected card failure');
+    };
+    const server = createHttpServer({ controlPlane: cp, exposeCardRegistration: true });
+    const { port, close } = await server.listen(0);
+    try {
+      const r = await request(`http://127.0.0.1:${port}`, 'POST', '/cards', card());
+      expect(r.status).toBe(500);
+      expect(r.body).toMatchObject({ error: 'internal', message: 'unexpected card failure' });
+    } finally {
+      close();
+    }
+  });
+
   it('card registration endpoint accepts an AgentCard and audits it', async () => {
     const r = await request(base, 'POST', '/cards', card());
     expect(r.status).toBe(200);
+  });
+
+  it('returns 404 when card registration is not exposed', async () => {
+    const audit = createInMemoryAuditLog();
+    const cards = createInMemoryCardRegistry();
+    const cp = new ControlPlane({ audit, cards });
+    const server = createHttpServer({ controlPlane: cp });
+    const { port, close } = await server.listen(0);
+    try {
+      const r = await request(`http://127.0.0.1:${port}`, 'POST', '/cards', card());
+      expect(r.status).toBe(404);
+    } finally {
+      close();
+    }
   });
 
   it('teardown does not throw on port 0', () => {

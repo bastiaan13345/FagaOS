@@ -133,6 +133,15 @@ describe('RateLimitBudget', () => {
     expect(() => new RateLimitBudget({ maxUnits: 0, windowMs: 1 })).toThrow();
     expect(() => new RateLimitBudget({ maxUnits: 1, windowMs: 0 })).toThrow();
   });
+
+  it('consumes multiple units and reports inspected state', () => {
+    let now = 10;
+    const b = new RateLimitBudget({ maxUnits: 3, windowMs: 100, clock: () => now });
+    expect(b.inspect()).toEqual({ used: 0, remaining: 3, oldest_age_ms: null });
+    expect(b.consume(2)).toEqual({ allowed: true, retry_after_ms: 0, remaining: 1 });
+    now = 40;
+    expect(b.inspect()).toEqual({ used: 2, remaining: 1, oldest_age_ms: 30 });
+  });
 });
 
 describe('ReauthTracker', () => {

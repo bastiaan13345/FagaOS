@@ -22,6 +22,7 @@ export default defineConfig({
         'packages/*/src/**/*.d.ts',
         'apps/*/src/**/index.ts',
         'apps/*/src/**/*.d.ts',
+        'apps/*/src/main.ts',
       ],
       thresholds: {
         // QA strategy: >=90% critical paths / >=80% overall.

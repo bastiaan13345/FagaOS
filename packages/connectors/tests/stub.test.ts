@@ -112,6 +112,19 @@ describe('StubCalendarConnector', () => {
     );
     expect(events.events.length).toBeGreaterThan(0);
     expect(events.next_sync_token).toMatch(/^stub-sync-/);
+
+    const event = await c.getEvent(
+      {
+        token: makeToken(),
+        account: makeAccount('google_calendar'),
+        operation: 'calendar.events.get',
+        args: { event_id: 'evt_1' },
+        idempotency_key: 'k-event',
+        trace_id: 't-event',
+      },
+      {} as never,
+    );
+    expect(event.event.id).toBeTruthy();
   });
 
   it('rejects mail-shaped operations', async () => {
@@ -128,5 +141,9 @@ describe('StubCalendarConnector', () => {
         {} as never,
       ),
     ).rejects.toMatchObject({ code: 'not_found' });
+    await expect(c.getMessage()).rejects.toMatchObject({ code: 'not_found' });
+    await expect(c.sendMessage()).rejects.toMatchObject({ code: 'not_found' });
+    await expect(c.listConversations()).rejects.toMatchObject({ code: 'not_found' });
+    await expect(c.sendDm()).rejects.toMatchObject({ code: 'not_found' });
   });
 });
