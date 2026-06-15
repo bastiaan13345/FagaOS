@@ -38,6 +38,40 @@ async function request(
   return { status: res.status, body: text ? JSON.parse(text) : null };
 }
 
+function streamReq(method?: string, url?: string, chunks: string[] = []) {
+  const listeners = new Map<string, Array<(arg?: unknown) => void>>();
+  return {
+    method,
+    url,
+    on(event: string, fn: (arg?: unknown) => void) {
+      listeners.set(event, [...(listeners.get(event) ?? []), fn]);
+      return this;
+    },
+    emitBody() {
+      for (const chunk of chunks) {
+        for (const fn of listeners.get('data') ?? []) fn(Buffer.from(chunk));
+      }
+      for (const fn of listeners.get('end') ?? []) fn();
+    },
+  };
+}
+
+function captureRes() {
+  let body = '';
+  const headers = new Map<string, string>();
+  return {
+    statusCode: 0,
+    setHeader(name: string, value: string) {
+      headers.set(name, value);
+    },
+    end(value: string) {
+      body = value;
+    },
+    body: () => JSON.parse(body),
+    header: (name: string) => headers.get(name),
+  };
+}
+
 describe('@fagaos/control-plane HTTP transport', () => {
   let base: string;
   let close: () => void;
@@ -79,6 +113,10 @@ describe('@fagaos/control-plane HTTP transport', () => {
     const actions = entries.entries.map((e) => e.action);
     expect(actions).toContain('session.create');
     expect(actions).toContain('tool.invoke');
+
+    const limitedLog = await request(base, 'GET', `/sessions/${sessionId}/log?sinceSeq=0&limit=1`);
+    expect(limitedLog.status).toBe(200);
+    expect(limitedLog.body.entries.length).toBe(1);
 
     const kill = await request(base, 'POST', `/sessions/${sessionId}/kill`, {
       reason: 'end of test',
@@ -169,6 +207,40 @@ describe('@fagaos/control-plane HTTP transport', () => {
   it('card registration endpoint accepts an AgentCard and audits it', async () => {
     const r = await request(base, 'POST', '/cards', card());
     expect(r.status).toBe(200);
+  });
+
+  it('handles missing method and URL defaults', async () => {
+    const audit = createInMemoryAuditLog();
+    const cards = createInMemoryCardRegistry();
+    const cp = new ControlPlane({ audit, cards });
+    const server = createHttpServer({ controlPlane: cp });
+    const req = streamReq();
+    const res = captureRes();
+
+    await server.handle(req as never, res as never);
+
+    expect(res.statusCode).toBe(404);
+    expect(res.body()).toMatchObject({ error: 'not_found', message: 'no route for GET /' });
+    expect(res.header('content-type')).toContain('application/json');
+  });
+
+  it('handles POST requests with empty bodies as an empty object', async () => {
+    const audit = createInMemoryAuditLog();
+    const cards = createInMemoryCardRegistry();
+    cards.register(card());
+    const cp = new ControlPlane({ audit, cards });
+    cp.killSession = async (_id, reason) => {
+      expect(reason).toBe('killed by caller');
+    };
+    const server = createHttpServer({ controlPlane: cp });
+    const req = streamReq('POST', '/sessions/s1/kill');
+    const res = captureRes();
+    const handled = server.handle(req as never, res as never);
+    req.emitBody();
+    await handled;
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body()).toEqual({ ok: true });
   });
 
   it('returns 404 when card registration is not exposed', async () => {

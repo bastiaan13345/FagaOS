@@ -96,6 +96,12 @@ describe('SandboxHarness', () => {
     const t = new SandboxTimeoutError(100);
     expect(t.name).toBe('SandboxTimeoutError');
     expect(t.message).toContain('100ms');
+    const m = new SandboxMemoryLimitError(64);
+    expect(m.name).toBe('SandboxMemoryLimitError');
+    expect(m.message).toContain('64 MiB');
+    const n = new SandboxNetworkDeniedError('https://evil.example.com', ['evil.example.com']);
+    expect(n.name).toBe('SandboxNetworkDeniedError');
+    expect(n.message).toContain('evil.example.com');
   });
 
   it('reports crashed when the child exits with a non-zero code', async () => {
@@ -237,5 +243,50 @@ describe('SandboxHarness', () => {
       // PATH should be inherited from the parent.
       expect(res.value.path).toBeDefined();
     }
+  }, 30_000);
+
+  it('returns null for an undefined result value', async () => {
+    const res = await harness.run<void>(() => undefined, [], { timeoutMs: 5_000 });
+    expect(res.reason).toBe('completed');
+    if (res.reason === 'completed') {
+      expect(res.value).toBeNull();
+    }
+  }, 30_000);
+
+  it('records only a truncation marker once maxLogLines is zero', async () => {
+    const res = await harness.run<void>(
+      () => {
+        process.stdout.write('hidden\n');
+        process.stderr.write('hidden\n');
+      },
+      [],
+      { timeoutMs: 5_000, maxLogLines: 0 },
+    );
+    expect(res.stdout).toEqual([{ stream: 'stdout', seq: 1, line: '<<truncated>>' }]);
+    expect(res.stderr).toEqual([{ stream: 'stderr', seq: 1, line: '<<truncated>>' }]);
+  }, 30_000);
+
+  it('truncates stdout and stderr after maxLogLines', async () => {
+    const res = await harness.run<void>(
+      () => {
+        process.stdout.write('out-1\nout-2\nout-3\n');
+        process.stderr.write('err-1\nerr-2\nerr-3\n');
+      },
+      [],
+      { timeoutMs: 5_000, maxLogLines: 1 },
+    );
+    expect(res.stdout.at(-1)?.line).toBe('<<truncated>>');
+    expect(res.stderr.at(-1)?.line).toBe('<<truncated>>');
+  }, 30_000);
+
+  it('allows network calls outside the denylist and records them', async () => {
+    const res = await harness.run<string>(
+      () => globalThis.__fagaosHostFetch('https://good.example.com/ping'),
+      [],
+      { timeoutMs: 5_000, networkDenylist: ['evil.example.com'] },
+    );
+    expect(res.reason).toBe('completed');
+    const allowed = res.networkCalls.find((c) => c.url.includes('good.example.com'));
+    expect(allowed?.allowed).toBe(true);
   }, 30_000);
 });

@@ -148,6 +148,7 @@ describe('ReauthTracker', () => {
   it('marks, reads, clears', () => {
     const r = new ReauthTracker();
     expect(r.isRequired('a1')).toBe(false);
+    expect(r.get('a1')).toBeNull();
     r.markReauthRequired('a1', 'invalid_grant');
     expect(r.isRequired('a1')).toBe(true);
     expect(r.get('a1')?.reason).toBe('invalid_grant');

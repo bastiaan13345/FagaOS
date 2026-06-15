@@ -167,6 +167,13 @@ describe('ConnectorGateway — calendar (gmail account routing)', () => {
   it('serves calendar operations on a google_calendar account', async () => {
     const ctx = makeGateway();
     await ctx.accounts.upsert(makeAccount('a1', 'google_calendar'));
+    const calendars = await ctx.gateway.calendarCalendarsList({
+      token: makeToken(),
+      account_id: 'a1',
+      args: {},
+    });
+    expect(calendars.calendars[0]?.id).toBe('stub-cal-a1');
+
     const out = await ctx.gateway.calendarEventsList({
       token: makeToken(),
       account_id: 'a1',
@@ -238,42 +245,41 @@ describe('ConnectorGateway — error paths', () => {
 });
 
 describe('ConnectorGateway — rate limit + idempotency', () => {
-  it('rejects the (maxUnits+1)th call with rate_limited', async () => {
+  it('rejects the 251st call with rate_limited when the gateway budget is exhausted', async () => {
     const ctx = makeGateway();
     await ctx.accounts.upsert(makeAccount('a1', 'gmail'));
-    // We need a way to override the budget; the gateway exposes no
-    // setter, so we issue `250` calls and expect the 251st to fail.
-    // For test speed we drive 5 calls in a row — the default budget
-    // is 250/60s so they all pass. We test the rejection path by
-    // issuing through a mock connector that throws `rate_limited` on
-    // its own — that path is covered below. To exercise the
-    // gateway's own budget we inject a custom gateway with a 2/60s
-    // budget by replacing the audit and running a fresh instance
-    // with a known clock.
-    void ctx;
-    // Build a fresh gateway with a 2/60s budget by issuing
-    // 2 successful calls + 1 expected rejection. We patch by
-    // monkey-patching the gateway's internal budget via a private
-    // reflection is not possible. Instead, we use the public surface
-    // and rely on the connector's failure path. The smoke test for
-    // the budget itself lives in `store.test.ts`; here we assert the
-    // gateway returns the right error when a connector raises
-    // `rate_limited`.
+    const token = makeToken();
+    for (let i = 0; i < 250; i++) {
+      const out = await ctx.gateway.mailList({ token, account_id: 'a1', args: { limit: 1 } });
+      expect(out.messages.length).toBe(1);
+    }
+
+    await expect(
+      ctx.gateway.mailList({ token, account_id: 'a1', args: { limit: 1 } }),
+    ).rejects.toMatchObject({ code: 'rate_limited' });
+    const denies = await ctx.audit.query({ actionName: 'connector.gmail.mail.list' });
+    expect(denies.some((e) => e.action.outcome === 'deny')).toBe(true);
+  });
+
+  it('audits connector-raised rate_limited errors as denials', async () => {
     const err: ConnectorError = new ConnectorError('rate_limited', 'over');
     const stub = new StubEmailConnector();
     vi.spyOn(stub, 'listMessages').mockRejectedValue(err);
+    const audit = new InMemoryAuditLog();
     const accounts = new InMemoryAccountStore();
     await accounts.upsert(makeAccount('a1', 'gmail'));
     const idempotency = new InMemoryIdempotencyStore();
     const reauth = new ReauthTracker();
     const features = new FeatureFlagRegistry({ gmail: true, google_calendar: true, stub_email: true, stub_calendar: true });
     const gateway = new ConnectorGateway({
-      audit: new InMemoryAuditLog(), accounts, idempotency, reauth, features,
+      audit, accounts, idempotency, reauth, features,
       connectors: new Map([['gmail', stub], ['google_calendar', new StubCalendarConnector()]]),
     });
     await expect(
       gateway.mailList({ token: makeToken(), account_id: 'a1', args: {} }),
     ).rejects.toMatchObject({ code: 'rate_limited' });
+    const entries = await audit.query({ actionName: 'connector.gmail.mail.list' });
+    expect(entries[0]?.action.outcome).toBe('deny');
   });
 
   it('replays an idempotency key with the cached response', async () => {

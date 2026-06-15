@@ -50,6 +50,24 @@ describe('ConnectorContractSuite', () => {
     expect(result.passed).toBe(8);
   });
 
+  it('health-check fails when the harness reports unhealthy', async () => {
+    const harness = new FakeConnectorHarness();
+    harness.health = async () => ({ ok: false, latencyMs: 1, error: 'downstream unavailable' });
+    const result = await suite.run({ connectorId: 'fake-unhealthy', harness });
+    const c = result.checks.find((x) => x.name === 'health-check');
+    expect(c?.ok).toBe(false);
+    expect(c?.error?.message).toMatch(/downstream unavailable/);
+  });
+
+  it('health-check fails when the harness reports negative latency', async () => {
+    const harness = new FakeConnectorHarness();
+    harness.health = async () => ({ ok: true, latencyMs: -1 });
+    const result = await suite.run({ connectorId: 'fake-negative-latency', harness });
+    const c = result.checks.find((x) => x.name === 'health-check');
+    expect(c?.ok).toBe(false);
+    expect(c?.error?.message).toMatch(/negative latency/);
+  });
+
   it('rejects unknown check names in defineCheck', () => {
     expect(() => defineCheck('not-a-real-check' as unknown as 'health-check', 'x', () => {})).toThrow();
   });

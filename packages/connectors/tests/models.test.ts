@@ -237,6 +237,26 @@ describe('EventSchema', () => {
     expect(e.attendees[0]?.status).toBe('accepted');
   });
 
+  it('accepts recurrence overrides that reference nested events', () => {
+    const e = EventSchema.parse({
+      ...baseEvent,
+      recurrence: {
+        rrule: 'FREQ=WEEKLY;COUNT=1',
+        exdates: ['2025-01-08T10:00:00.000Z'],
+        overrides: [
+          {
+            ...baseEvent,
+            id: 'e1-override',
+            title: 'Moved stand-up',
+            start: { tz: 'UTC', at: '2025-01-08T11:00:00.000Z' },
+            end: { tz: 'UTC', at: '2025-01-08T11:30:00.000Z' },
+          },
+        ],
+      },
+    });
+    expect(e.recurrence?.overrides?.[0]?.title).toBe('Moved stand-up');
+  });
+
   it('rejects an unknown status', () => {
     expect(() =>
       EventSchema.parse({ ...baseEvent, status: 'mystery' }),
