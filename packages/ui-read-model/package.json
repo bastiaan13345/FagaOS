@@ -1,5 +1,5 @@
 {
-  "name": "@fagaos/desktop-bridge",
+  "name": "@fagaos/ui-read-model",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -10,9 +10,12 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "test": "vitest run --root ../.."
+    "test": "vitest run"
   },
   "dependencies": {
-    "@fagaos/audit-log": "*"
+    "@fagaos/audit-log": "*",
+    "@fagaos/connectors": "*",
+    "@fagaos/control-plane": "*",
+    "zod": "^3.23.0"
   }
 }

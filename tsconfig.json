@@ -23,10 +23,12 @@
   "files": [],
   "references": [
     { "path": "./packages/core" },
+    { "path": "./packages/audit-log" },
     { "path": "./packages/policy" },
     { "path": "./packages/runtime" },
     { "path": "./packages/connectors" },
     { "path": "./packages/desktop-bridge" },
+    { "path": "./packages/ui-read-model" },
     { "path": "./packages/qa-harness" }
   ]
 }

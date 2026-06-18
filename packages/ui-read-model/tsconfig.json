@@ -9,6 +9,8 @@
   "include": ["src/**/*"],
   "exclude": ["dist", "node_modules", "tests"],
   "references": [
-    { "path": "../audit-log" }
+    { "path": "../audit-log" },
+    { "path": "../connectors" },
+    { "path": "../control-plane" }
   ]
 }
