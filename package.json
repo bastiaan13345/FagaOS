@@ -16,7 +16,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "verify": "npm run lint && npm run typecheck && npm run test:coverage"
+    "verify": "npm run lint && npm run typecheck && npm run build && npm run test:coverage"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

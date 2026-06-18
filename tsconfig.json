@@ -23,6 +23,7 @@
   "files": [],
   "references": [
     { "path": "./packages/core" },
+    { "path": "./packages/audit-log" },
     { "path": "./packages/policy" },
     { "path": "./packages/runtime" },
     { "path": "./packages/connectors" },
