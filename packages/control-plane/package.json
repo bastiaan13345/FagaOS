@@ -8,7 +8,9 @@
   "types": "dist/index.d.ts",
   "exports": {
     ".": "./dist/index.js",
-    "./http": "./dist/http.js"
+    "./http": "./dist/http.js",
+    "./auth": "./dist/auth.js",
+    "./observability": "./dist/observability.js"
   },
   "scripts": {
     "build": "tsc -b",

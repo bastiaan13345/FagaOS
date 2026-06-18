@@ -1,10 +1,7 @@
 /**
  * @fagaos/control-plane/http
  *
- * Minimal HTTP transport for the control-plane API stubs. The goal
- * is to make the contracts *testable end-to-end* and consumable by
- * the orchestrator over HTTP in Phase 0, without committing us to
- * a framework we may want to swap in Phase 1.
+ * HTTP transport for the control-plane API.
  *
  * Endpoint surface:
  *   POST   /sessions
@@ -13,16 +10,35 @@
  *   POST   /sessions/:id/tools/:tool
  *   POST   /sessions/:id/kill
  *   GET    /sessions/:id/log?sinceSeq=&limit=
+ *   POST   /tasks, GET/POST /tasks/:id/...
+ *   GET    /healthz          — liveness probe (no auth required if allowUnauthenticatedHealthChecks)
+ *   GET    /readyz           — readiness probe (same)
+ *   GET    /metrics          — in-process counters (admin role)
  *
- * Each request is mapped to a ControlPlane method. The handler also
- * appends a request-level audit entry (action = the same verb) so
- * even rejected requests are recorded. The control plane's domain
- * methods append their own resource-level entries, so the chain
- * captures both.
+ * Every request is authenticated (Bearer token) and authorized by role.
+ * Request lifecycle is instrumented: structured log + metrics counter per
+ * outcome, correlated with session/task audit chain via correlationId.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { ControlPlane, ControlPlaneError } from './index.js';
 import type { AgentCard } from '@fagaos/agent-manifest';
+import {
+  authenticate,
+  authorize,
+  callerToActor,
+  type AuthConfig,
+  type CallerIdentity,
+  type CallerRole,
+} from './auth.js';
+import {
+  createLogger,
+  createMetrics,
+  createHealthChecker,
+  newCorrelationId,
+  type Logger,
+  type Metrics,
+  type HealthChecker,
+} from './observability.js';
 
 export interface HttpServerOptions {
   controlPlane: ControlPlane;
@@ -32,33 +48,55 @@ export interface HttpServerOptions {
    * in-band; production cards are loaded from a registry service.
    */
   exposeCardRegistration?: boolean;
+  /** Auth configuration. When omitted the server runs unauthenticated (dev/test only). */
+  auth?: AuthConfig;
+  /** Injected logger; defaults to a structured stdout logger. */
+  logger?: Logger;
+  /** Injected metrics; defaults to a new in-process metrics instance. */
+  metrics?: Metrics;
+  /** Injected health checker; defaults to a new checker with no registered checks. */
+  health?: HealthChecker;
 }
 
 interface Route {
   method: string;
   pattern: RegExp;
   paramNames: string[];
-  handler: (params: Record<string, string>, body: unknown, req: IncomingMessage) => Promise<unknown>;
+  /** Minimum role required to call this route. undefined = no auth required. */
+  requiredRole?: CallerRole;
+  handler: (
+    params: Record<string, string>,
+    body: unknown,
+    req: IncomingMessage,
+    caller: CallerIdentity | null,
+  ) => Promise<unknown>;
 }
 
 function buildRoutes(opts: HttpServerOptions): Route[] {
   const cp = opts.controlPlane;
+  const health = opts.health ?? createHealthChecker();
+  const metrics = opts.metrics ?? createMetrics();
   const r: Route[] = [];
+
+  // ── Session routes ───────────────────────────────────────────────────
 
   r.push({
     method: 'POST',
     pattern: /^\/sessions$/,
     paramNames: [],
-    handler: async (_p, body) => {
+    requiredRole: 'invoker',
+    handler: async (_p, body, _req, caller) => {
       const b = body as {
         agentId: string;
-        createdBy: { id: string; type: 'user' | 'agent' | 'system' };
+        createdBy?: { id: string; type: 'user' | 'agent' | 'system' };
         input: Record<string, unknown>;
         agentCard?: AgentCard;
       };
+      // Use authenticated caller identity as createdBy when not overridden
+      const createdBy = b.createdBy ?? (caller ? callerToActor(caller) : { id: 'system', type: 'system' as const });
       const session = await cp.createSession({
         agentId: b.agentId,
-        createdBy: b.createdBy,
+        createdBy,
         input: b.input ?? {},
         ...(b.agentCard !== undefined ? { agentCard: b.agentCard } : {}),
       });
@@ -70,6 +108,7 @@ function buildRoutes(opts: HttpServerOptions): Route[] {
     method: 'GET',
     pattern: /^\/sessions\/([^/]+)$/,
     paramNames: ['id'],
+    requiredRole: 'reader',
     handler: async (p) => ({ session: cp.getSession(p['id']!) }) as unknown,
   });
 
@@ -77,6 +116,7 @@ function buildRoutes(opts: HttpServerOptions): Route[] {
     method: 'DELETE',
     pattern: /^\/sessions\/([^/]+)$/,
     paramNames: ['id'],
+    requiredRole: 'admin',
     handler: async (p) => {
       await cp.deleteSession(p['id']!);
       return { ok: true };
@@ -87,6 +127,7 @@ function buildRoutes(opts: HttpServerOptions): Route[] {
     method: 'POST',
     pattern: /^\/sessions\/([^/]+)\/tools\/([^/]+)$/,
     paramNames: ['id', 'tool'],
+    requiredRole: 'invoker',
     handler: async (p, body) => {
       const b = (body ?? {}) as { arguments?: Record<string, unknown> };
       const result = await cp.invokeTool(
@@ -102,6 +143,7 @@ function buildRoutes(opts: HttpServerOptions): Route[] {
     method: 'POST',
     pattern: /^\/sessions\/([^/]+)\/kill$/,
     paramNames: ['id'],
+    requiredRole: 'admin',
     handler: async (p, body) => {
       const b = (body ?? {}) as { reason?: string };
       await cp.killSession(p['id']!, b.reason ?? 'killed by caller');
@@ -109,26 +151,30 @@ function buildRoutes(opts: HttpServerOptions): Route[] {
     },
   });
 
+  // ── Task routes ──────────────────────────────────────────────────────
+
   r.push({
     method: 'POST',
     pattern: /^\/tasks$/,
     paramNames: [],
-    handler: async (_p, body) => {
+    requiredRole: 'invoker',
+    handler: async (_p, body, _req, caller) => {
       const b = body as {
         sessionId: string;
         tool: string;
         arguments?: Record<string, unknown>;
-        createdBy: { id: string; type: 'user' | 'agent' | 'system' };
+        createdBy?: { id: string; type: 'user' | 'agent' | 'system' };
         auditCorrelationId?: string;
         capabilityCheck: { ok: boolean; policyId?: string; reason?: string };
         maxAttempts?: number;
         scheduledAt?: string;
       };
+      const createdBy = b.createdBy ?? (caller ? callerToActor(caller) : { id: 'system', type: 'system' as const });
       const task = await cp.enqueueTask({
         sessionId: b.sessionId,
         tool: b.tool,
         arguments: b.arguments ?? {},
-        createdBy: b.createdBy,
+        createdBy,
         capabilityCheck: b.capabilityCheck,
         ...(b.auditCorrelationId !== undefined ? { auditCorrelationId: b.auditCorrelationId } : {}),
         ...(b.maxAttempts !== undefined ? { maxAttempts: b.maxAttempts } : {}),
@@ -142,6 +188,7 @@ function buildRoutes(opts: HttpServerOptions): Route[] {
     method: 'POST',
     pattern: /^\/tasks\/claim$/,
     paramNames: [],
+    requiredRole: 'invoker',
     handler: async (_p, body) => {
       const b = body as { workerId: string; leaseMs: number };
       const claim = await cp.claimTask({ workerId: b.workerId, leaseMs: b.leaseMs });
@@ -153,6 +200,7 @@ function buildRoutes(opts: HttpServerOptions): Route[] {
     method: 'GET',
     pattern: /^\/tasks\/([^/]+)$/,
     paramNames: ['id'],
+    requiredRole: 'reader',
     handler: async (p) => ({ task: cp.getTask(p['id']!) }) as unknown,
   });
 
@@ -160,6 +208,7 @@ function buildRoutes(opts: HttpServerOptions): Route[] {
     method: 'POST',
     pattern: /^\/tasks\/([^/]+)\/heartbeat$/,
     paramNames: ['id'],
+    requiredRole: 'invoker',
     handler: async (p, body) => {
       const b = body as { workerId: string; leaseMs: number };
       const task = await cp.heartbeatTask(p['id']!, { workerId: b.workerId, leaseMs: b.leaseMs });
@@ -171,6 +220,7 @@ function buildRoutes(opts: HttpServerOptions): Route[] {
     method: 'POST',
     pattern: /^\/tasks\/([^/]+)\/complete$/,
     paramNames: ['id'],
+    requiredRole: 'invoker',
     handler: async (p, body) => {
       const b = body as { workerId: string; result?: Record<string, unknown> };
       const task = await cp.completeTask(p['id']!, {
@@ -185,6 +235,7 @@ function buildRoutes(opts: HttpServerOptions): Route[] {
     method: 'POST',
     pattern: /^\/tasks\/([^/]+)\/fail$/,
     paramNames: ['id'],
+    requiredRole: 'invoker',
     handler: async (p, body) => {
       const b = body as { workerId: string; error: string; retryDelayMs?: number };
       const task = await cp.failTask(p['id']!, {
@@ -200,6 +251,7 @@ function buildRoutes(opts: HttpServerOptions): Route[] {
     method: 'POST',
     pattern: /^\/tasks\/([^/]+)\/cancel$/,
     paramNames: ['id'],
+    requiredRole: 'admin',
     handler: async (p, body) => {
       const b = body as {
         reason?: string;
@@ -217,33 +269,68 @@ function buildRoutes(opts: HttpServerOptions): Route[] {
     method: 'POST',
     pattern: /^\/tasks\/recover$/,
     paramNames: [],
+    requiredRole: 'system',
     handler: async () => {
       const tasks = await cp.recoverStuckTasks();
       return { tasks };
     },
   });
 
+  // ── Audit log ────────────────────────────────────────────────────────
+
   r.push({
     method: 'GET',
     pattern: /^\/sessions\/([^/]+)\/log$/,
     paramNames: ['id'],
+    requiredRole: 'reader',
     handler: async (p, _body, req) => {
       const url = new URL(req.url ?? '/', 'http://localhost');
       const sinceSeqRaw = url.searchParams.get('sinceSeq');
       const limitRaw = url.searchParams.get('limit');
-      const opts: { sinceSeq?: number; limit?: number } = {};
-      if (sinceSeqRaw !== null) opts.sinceSeq = Number(sinceSeqRaw);
-      if (limitRaw !== null) opts.limit = Number(limitRaw);
-      const entries = await cp.getSessionLog(p['id']!, opts);
+      const logOpts: { sinceSeq?: number; limit?: number } = {};
+      if (sinceSeqRaw !== null) logOpts.sinceSeq = Number(sinceSeqRaw);
+      if (limitRaw !== null) logOpts.limit = Number(limitRaw);
+      const entries = await cp.getSessionLog(p['id']!, logOpts);
       return { entries };
     },
   });
+
+  // ── Health / readiness ───────────────────────────────────────────────
+
+  r.push({
+    method: 'GET',
+    pattern: /^\/healthz$/,
+    paramNames: [],
+    // no requiredRole — liveness is always public
+    handler: async () => health.check(),
+  });
+
+  r.push({
+    method: 'GET',
+    pattern: /^\/readyz$/,
+    paramNames: [],
+    // no requiredRole — readiness is always public
+    handler: async () => health.check(),
+  });
+
+  // ── Metrics ──────────────────────────────────────────────────────────
+
+  r.push({
+    method: 'GET',
+    pattern: /^\/metrics$/,
+    paramNames: [],
+    requiredRole: 'admin',
+    handler: async () => metrics.snapshot(),
+  });
+
+  // ── Card registration (optional) ─────────────────────────────────────
 
   if (opts.exposeCardRegistration) {
     r.push({
       method: 'POST',
       pattern: /^\/cards$/,
       paramNames: [],
+      requiredRole: 'admin',
       handler: async (_p, body) => {
         await cp.registerCard(body as AgentCard);
         return { ok: true };
@@ -313,35 +400,92 @@ export interface FagaosHttpServer {
 
 export function createHttpServer(opts: HttpServerOptions): FagaosHttpServer {
   const routes = buildRoutes(opts);
+  const log = opts.logger ?? createLogger('control-plane');
+  const metrics = opts.metrics ?? createMetrics();
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const start = Date.now();
     const method = (req.method ?? 'GET').toUpperCase();
     const url = new URL(req.url ?? '/', 'http://localhost');
+    const correlationId = newCorrelationId();
+    const reqLog = log.child({ correlationId, method, path: url.pathname });
+
     const matched = matchRoute(routes, method, url.pathname);
     if (!matched) {
+      metrics.inc('http.not_found');
+      reqLog.warn('route not found', { statusCode: 404 });
       json(res, 404, { error: 'not_found', message: `no route for ${method} ${url.pathname}` });
       return;
     }
+
+    // ── Authentication ────────────────────────────────────────────────
+    let caller: CallerIdentity | null = null;
+    const routeRequiresAuth = matched.route.requiredRole !== undefined;
+
+    if (routeRequiresAuth) {
+      if (!opts.auth) {
+        // No auth config — dev/test mode, synthesise a system caller with admin rights
+        caller = { id: 'system:dev', type: 'system', role: 'admin' };
+      } else {
+        const authResult = authenticate(req.headers['authorization'], opts.auth);
+        if (!authResult.ok) {
+          metrics.inc('http.auth_fail');
+          reqLog.warn('authentication failed', { code: authResult.code, statusCode: authResult.status });
+          json(res, authResult.status, { error: authResult.code, message: authResult.message });
+          return;
+        }
+        const authzResult = authorize(authResult.caller, matched.route.requiredRole!);
+        if (!authzResult.ok) {
+          metrics.inc('http.authz_fail');
+          reqLog.warn('authorization denied', {
+            callerId: authResult.caller.id,
+            required: matched.route.requiredRole,
+            actual: authResult.caller.role,
+            statusCode: 403,
+          });
+          json(res, authzResult.status, { error: authzResult.code, message: authzResult.message });
+          return;
+        }
+        caller = authResult.caller;
+      }
+    }
+
+    // ── Body parsing ──────────────────────────────────────────────────
     let body: unknown = {};
     if (method === 'POST' || method === 'PUT' || method === 'PATCH') {
       try {
         body = await readBody(req);
       } catch (e) {
+        metrics.inc('http.bad_request');
         json(res, 400, { error: 'invalid_json', message: (e as Error).message });
         return;
       }
     }
+
+    // ── Dispatch ──────────────────────────────────────────────────────
     try {
-      const result = await matched.route.handler(matched.params, body, req);
+      const result = await matched.route.handler(matched.params, body, req, caller);
+      const durationMs = Date.now() - start;
+      metrics.inc('http.ok');
+      reqLog.info('request ok', {
+        statusCode: 200,
+        durationMs,
+        callerId: caller?.id,
+      });
       json(res, 200, result);
     } catch (e) {
+      const durationMs = Date.now() - start;
       if (e instanceof ControlPlaneError) {
         const status =
           e.code === 'session_not_found' || e.code === 'task_not_found' ? 404
           : e.code === 'invalid_input' ? 400
           : 409;
+        metrics.inc(`http.error.${e.code}`);
+        reqLog.warn('control plane error', { statusCode: status, code: e.code, durationMs });
         json(res, status, { error: e.code, message: e.message });
       } else {
+        metrics.inc('http.error.internal');
+        reqLog.error('internal error', { statusCode: 500, error: (e as Error).message, durationMs });
         json(res, 500, { error: 'internal', message: (e as Error).message });
       }
     }
