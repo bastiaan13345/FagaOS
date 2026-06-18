@@ -497,6 +497,7 @@ export class ControlPlane {
     const task = this.repository
       .listTasks()
       .filter((candidate) => candidate.state === 'queued')
+      .filter((candidate) => candidate.capabilityCheck.ok)
       .filter((candidate) => Date.parse(candidate.scheduledAt) <= now.getTime())
       .sort((a, b) => Date.parse(a.scheduledAt) - Date.parse(b.scheduledAt))[0];
     if (!task) return null;

@@ -12,5 +12,9 @@
     "build": "tsc -b",
     "test": "vitest run"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@fagaos/agent-manifest": "*",
+    "@fagaos/audit-log": "*",
+    "@fagaos/control-plane": "*"
+  }
 }
