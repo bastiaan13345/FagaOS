@@ -17,6 +17,15 @@ adapters.
   lease owner, lease expiry, and terminal result or reason.
 - `toolInvocations`: tool gateway records with session id, tool name, input
   arguments, result/error, duration, and gateway correlation id.
+- `approvals`: human approval requests bound to a session and optionally a
+  task/tool call. Each request carries risk reason, proposed action, source
+  evidence, affected resource, timeout, policy rule, audit correlation id,
+  decision actor/reason, and lifecycle state.
+- `notificationPreferences`: local notification preference rows keyed by
+  topic/severity. Phase 0 only supports the `local_dev` channel.
+- `notifications`: deduplicated local-dev notification records for approvals,
+  failures, policy denials, reauth needs, long-running stalls, and takeover
+  requests.
 
 The local backend is `JsonFileControlPlaneRepository`. It writes one JSON
 document atomically by writing a temporary file and renaming it into place. This
@@ -55,6 +64,55 @@ claimed work terminal `cancelled`. `completeTask` marks claimed work terminal
 Every lifecycle transition appends an audit entry. Task audit data includes the
 task's `auditCorrelationId`, session id, and resulting state so audit readers can
 link enqueue, claim, retry, recovery, cancellation, and completion events.
+
+## Approval and Escalation Semantics
+
+Approvals use this lifecycle:
+
+```
+requested -> viewed -> approved -> executed
+requested/viewed -> denied
+requested/viewed -> edited
+requested/viewed -> expired
+requested/viewed -> cancelled
+requested/viewed -> superseded
+executed -> failed
+```
+
+The current control-plane implementation writes `requested`, `approved`,
+`denied`, `edited`, `expired`, `cancelled`, and `superseded` states; `viewed`,
+`executed`, and `failed` are reserved for the UI/runtime handoff that observes
+or executes an approved request.
+
+Duplicate active approvals for the same session, task, and policy rule are
+superseded when a newer request arrives. This keeps the queue focused on the
+latest proposal while preserving the older request in the audit chain.
+
+Every approval request, decision, and expiration appends an audit entry with
+`approvalId`, `sessionId`, `taskId`, `toolCallId`, `auditCorrelationId`,
+`policyRule`, and `affectedResource`. Escalations add `escalation.request`
+entries with the same session/task correlation. This lets audit readers join the
+human decision back to the task, tool call, actor, session, and resource.
+
+Terminal task failure automatically creates a `repeated_tool_failure`
+escalation approval and a deduplicated `local_dev` notification. Policy denials
+can be escalated through the policy-denial API; repeated calls reuse the active
+approval and do not emit duplicate notifications.
+
+## HTTP Surface
+
+The local control-plane HTTP server exposes the approval surface for dev/UI
+integration:
+
+- `POST /approvals` creates an approval request.
+- `GET /approvals` and `GET /approvals/:id` read the queue.
+- `POST /approvals/:id/decision` records approve, deny, edit, or cancel.
+- `POST /approvals/expire` expires timed-out active requests.
+- `POST /tasks/:id/escalate-policy-denial` creates or reuses a policy-denial
+  escalation.
+- `GET /notifications` reads local-dev notification records.
+- `GET /notification-preferences` and `POST /notification-preferences` read and
+  set local notification preferences.
 
 ## Local Setup
 

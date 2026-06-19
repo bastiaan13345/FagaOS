@@ -20,7 +20,7 @@
  * outcome, correlated with session/task audit chain via correlationId.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { ControlPlane, ControlPlaneError } from './index.js';
+import { ControlPlane, ControlPlaneError, type NotificationPreference } from './index.js';
 import type { AgentCard } from '@fagaos/agent-manifest';
 import {
   authenticate,
@@ -274,6 +274,124 @@ function buildRoutes(opts: HttpServerOptions): Route[] {
       const tasks = await cp.recoverStuckTasks();
       return { tasks };
     },
+  });
+
+  // ── Approvals / notifications ───────────────────────────────────────
+
+  r.push({
+    method: 'POST',
+    pattern: /^\/approvals$/,
+    paramNames: [],
+    requiredRole: 'invoker',
+    handler: async (_p, body) => {
+      const b = body as {
+        sessionId: string;
+        taskId?: string | null;
+        toolCallId?: string | null;
+        requestedBy: { id: string; type: 'user' | 'agent' | 'system' };
+        riskReason: string;
+        proposedAction: string;
+        sourceEvidence?: Array<{ kind: string; id: string; summary: string }>;
+        affectedResource: { kind: string; id: string };
+        timeoutAt: string;
+        policyRule: string;
+        auditCorrelationId: string;
+      };
+      const approval = await cp.requestApproval({
+        sessionId: b.sessionId,
+        ...(b.taskId !== undefined ? { taskId: b.taskId } : {}),
+        ...(b.toolCallId !== undefined ? { toolCallId: b.toolCallId } : {}),
+        requestedBy: b.requestedBy,
+        riskReason: b.riskReason,
+        proposedAction: b.proposedAction,
+        sourceEvidence: b.sourceEvidence ?? [],
+        affectedResource: b.affectedResource,
+        timeoutAt: b.timeoutAt,
+        policyRule: b.policyRule,
+        auditCorrelationId: b.auditCorrelationId,
+      });
+      return { approval };
+    },
+  });
+
+  r.push({
+    method: 'GET',
+    pattern: /^\/approvals$/,
+    paramNames: [],
+    requiredRole: 'reader',
+    handler: async () => ({ approvals: cp.listApprovals() }),
+  });
+
+  r.push({
+    method: 'GET',
+    pattern: /^\/approvals\/([^/]+)$/,
+    paramNames: ['id'],
+    requiredRole: 'reader',
+    handler: async (p) => ({ approval: cp.getApproval(p['id']!) }),
+  });
+
+  r.push({
+    method: 'POST',
+    pattern: /^\/approvals\/([^/]+)\/decision$/,
+    paramNames: ['id'],
+    requiredRole: 'admin',
+    handler: async (p, body) => {
+      const b = body as {
+        actor: { id: string; type: 'user' | 'agent' | 'system' };
+        decision: 'approve' | 'deny' | 'edit' | 'cancel';
+        reason?: string;
+        editedAction?: string;
+      };
+      const approval = await cp.decideApproval(p['id']!, {
+        actor: b.actor,
+        decision: b.decision,
+        ...(b.reason !== undefined ? { reason: b.reason } : {}),
+        ...(b.editedAction !== undefined ? { editedAction: b.editedAction } : {}),
+      });
+      return { approval };
+    },
+  });
+
+  r.push({
+    method: 'POST',
+    pattern: /^\/approvals\/expire$/,
+    paramNames: [],
+    requiredRole: 'system',
+    handler: async () => ({ approvals: await cp.expireApprovals() }),
+  });
+
+  r.push({
+    method: 'POST',
+    pattern: /^\/tasks\/([^/]+)\/escalate-policy-denial$/,
+    paramNames: ['id'],
+    requiredRole: 'system',
+    handler: async (p) => ({ approval: await cp.escalatePolicyDenial(p['id']!) }),
+  });
+
+  r.push({
+    method: 'GET',
+    pattern: /^\/notifications$/,
+    paramNames: [],
+    requiredRole: 'reader',
+    handler: async () => ({ notifications: cp.listNotifications() }),
+  });
+
+  r.push({
+    method: 'GET',
+    pattern: /^\/notification-preferences$/,
+    paramNames: [],
+    requiredRole: 'reader',
+    handler: async () => ({ preferences: cp.listNotificationPreferences() }),
+  });
+
+  r.push({
+    method: 'POST',
+    pattern: /^\/notification-preferences$/,
+    paramNames: [],
+    requiredRole: 'admin',
+    handler: async (_p, body) => ({
+      preference: await cp.setNotificationPreference(body as NotificationPreference),
+    }),
   });
 
   // ── Audit log ────────────────────────────────────────────────────────

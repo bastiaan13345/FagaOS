@@ -39,7 +39,12 @@ import {
 } from './repository.js';
 import {
   SessionStateSchema,
+  type ApprovalRequest,
   type Actor,
+  type LocalNotification,
+  type NotificationPreference,
+  type NotificationSeverity,
+  type NotificationTopic,
   type Session,
   type SessionId,
   type ToolInvocationRecord,
@@ -48,7 +53,22 @@ import {
 /* ----------------------------- Session model ----------------------------- */
 
 export { SessionStateSchema };
-export type { SessionState, Session, SessionId, ToolInvocationRecord } from './types.js';
+export type {
+  ApprovalDecision,
+  ApprovalEvidence,
+  ApprovalRequest,
+  ApprovalResource,
+  ApprovalState,
+  LocalNotification,
+  NotificationChannel,
+  NotificationPreference,
+  NotificationSeverity,
+  NotificationTopic,
+  SessionState,
+  Session,
+  SessionId,
+  ToolInvocationRecord,
+} from './types.js';
 export {
   InMemoryControlPlaneRepository,
   JsonFileControlPlaneRepository,
@@ -161,6 +181,8 @@ export class ControlPlaneError extends Error {
       | 'task_not_found'
       | 'task_not_claimed'
       | 'task_already_terminal'
+      | 'approval_not_found'
+      | 'approval_not_active'
       | 'internal',
     message: string,
   ) {
@@ -271,6 +293,28 @@ export interface CancelTaskInput {
 
 export interface ClaimTaskResult {
   task: ControlPlaneTask;
+}
+
+export interface RequestApprovalInput {
+  sessionId: string;
+  taskId?: string | null;
+  toolCallId?: string | null;
+  requestedBy: Actor;
+  riskReason: string;
+  proposedAction: string;
+  sourceEvidence: Array<{ kind: string; id: string; summary: string }>;
+  affectedResource: { kind: string; id: string };
+  timeoutAt: string;
+  policyRule: string;
+  auditCorrelationId: string;
+  escalationReason?: string | null;
+}
+
+export interface DecideApprovalInput {
+  actor: Actor;
+  decision: 'approve' | 'deny' | 'edit' | 'cancel';
+  reason?: string;
+  editedAction?: string;
 }
 
 export class ControlPlane {
@@ -586,6 +630,7 @@ export class ControlPlane {
         error: input.error,
         retry: false,
       });
+      await this.escalateTaskFailure(task, input.error);
       return task;
     }
 
@@ -655,6 +700,188 @@ export class ControlPlane {
     return this.repository.listToolInvocations();
   }
 
+  /* ---------------- Approvals / notifications / escalation -------------- */
+
+  async requestApproval(input: RequestApprovalInput): Promise<ApprovalRequest> {
+    this.getSession(input.sessionId);
+    if (input.taskId) this.requireTask(input.taskId);
+    const now = this.clock().toISOString();
+    const approvalId = randomUUID();
+    for (const existing of this.repository.listApprovals()) {
+      if (
+        existing.state === 'requested' &&
+        existing.sessionId === input.sessionId &&
+        existing.taskId === (input.taskId ?? null) &&
+        existing.policyRule === input.policyRule
+      ) {
+        existing.state = 'superseded';
+        existing.updatedAt = now;
+        existing.supersededBy = approvalId;
+        await this.repository.saveApproval(existing);
+        await this.auditApproval('approval.supersede', existing, { id: 'system:control-plane', type: 'system' }, {
+          supersededBy: approvalId,
+          severity: 'info',
+        });
+      }
+    }
+
+    const approval: ApprovalRequest = {
+      id: approvalId,
+      sessionId: input.sessionId,
+      taskId: input.taskId ?? null,
+      toolCallId: input.toolCallId ?? input.taskId ?? null,
+      state: 'requested',
+      requestedBy: input.requestedBy,
+      riskReason: input.riskReason,
+      proposedAction: input.proposedAction,
+      editedAction: null,
+      sourceEvidence: input.sourceEvidence,
+      affectedResource: input.affectedResource,
+      timeoutAt: input.timeoutAt,
+      policyRule: input.policyRule,
+      auditCorrelationId: input.auditCorrelationId,
+      createdAt: now,
+      updatedAt: now,
+      decision: null,
+      supersededBy: null,
+      escalationReason: input.escalationReason ?? null,
+    };
+    await this.repository.saveApproval(approval);
+    await this.auditApproval('approval.request', approval, input.requestedBy, {
+      severity: input.escalationReason ? 'error' : 'info',
+    });
+    if (!input.escalationReason) {
+      await this.sendLocalNotification({
+        topic: 'approvals',
+        severity: 'info',
+        title: 'Approval requested',
+        body: approval.riskReason,
+        dedupeKey: `approval:${approval.sessionId}:${approval.taskId ?? approval.affectedResource.id}:${approval.policyRule}`,
+        resource: approval.affectedResource,
+        approvalId: approval.id,
+        auditCorrelationId: approval.auditCorrelationId,
+      });
+    }
+    return approval;
+  }
+
+  getApproval(approvalId: string): ApprovalRequest {
+    const approval = this.repository.getApproval(approvalId);
+    if (!approval) {
+      throw new ControlPlaneError('approval_not_found', `approval "${approvalId}" not found`);
+    }
+    return approval;
+  }
+
+  listApprovals(): ApprovalRequest[] {
+    return this.repository.listApprovals();
+  }
+
+  async decideApproval(approvalId: string, input: DecideApprovalInput): Promise<ApprovalRequest> {
+    const approval = this.getApproval(approvalId);
+    if (!['requested', 'viewed'].includes(approval.state)) {
+      throw new ControlPlaneError(
+        'approval_not_active',
+        `approval "${approvalId}" is in state "${approval.state}"`,
+      );
+    }
+    const now = this.clock().toISOString();
+    approval.updatedAt = now;
+    approval.decision = {
+      actor: input.actor,
+      decidedAt: now,
+      reason: input.reason ?? null,
+    };
+    if (input.decision === 'approve') approval.state = 'approved';
+    if (input.decision === 'deny') approval.state = 'denied';
+    if (input.decision === 'cancel') approval.state = 'cancelled';
+    if (input.decision === 'edit') {
+      if (!input.editedAction) {
+        throw new ControlPlaneError('invalid_input', 'editedAction is required for edit decisions');
+      }
+      approval.state = 'edited';
+      approval.editedAction = input.editedAction;
+    }
+    await this.repository.saveApproval(approval);
+    await this.auditApproval(`approval.${input.decision}`, approval, input.actor, {
+      reason: input.reason ?? null,
+      editedAction: approval.editedAction,
+      severity: input.decision === 'approve' ? 'info' : 'warning',
+    });
+    return approval;
+  }
+
+  async expireApprovals(): Promise<ApprovalRequest[]> {
+    const now = this.clock();
+    const expired: ApprovalRequest[] = [];
+    for (const approval of this.repository.listApprovals()) {
+      if (
+        (approval.state !== 'requested' && approval.state !== 'viewed') ||
+        Date.parse(approval.timeoutAt) > now.getTime()
+      ) {
+        continue;
+      }
+      approval.state = 'expired';
+      approval.updatedAt = now.toISOString();
+      await this.repository.saveApproval(approval);
+      await this.auditApproval('approval.expire', approval, { id: 'system:control-plane', type: 'system' }, {
+        severity: 'warning',
+      });
+      expired.push(approval);
+    }
+    return expired;
+  }
+
+  listNotificationPreferences(): NotificationPreference[] {
+    return this.repository.listNotificationPreferences();
+  }
+
+  async setNotificationPreference(preference: NotificationPreference): Promise<NotificationPreference> {
+    await this.repository.saveNotificationPreference(preference);
+    return preference;
+  }
+
+  listNotifications(): LocalNotification[] {
+    return this.repository.listNotifications();
+  }
+
+  async escalatePolicyDenial(taskId: string): Promise<ApprovalRequest> {
+    const task = this.requireTask(taskId);
+    const existing = this.findEscalation('policy_denial', task.id);
+    if (existing) return existing;
+    const reason = task.capabilityCheck.reason ?? 'Policy denied the requested tool capability';
+    const approval = await this.requestApproval({
+      sessionId: task.sessionId,
+      taskId: task.id,
+      toolCallId: task.id,
+      requestedBy: { id: 'system:policy', type: 'system' },
+      riskReason: `Policy denied tool "${task.tool}": ${reason}`,
+      proposedAction: `Review denied tool request for ${task.tool}`,
+      sourceEvidence: [{
+        kind: 'policy',
+        id: task.capabilityCheck.policyId ?? 'unknown',
+        summary: reason,
+      }],
+      affectedResource: { kind: 'task', id: task.id },
+      timeoutAt: new Date(this.clock().getTime() + 15 * 60_000).toISOString(),
+      policyRule: task.capabilityCheck.policyId ?? 'policy.unknown',
+      auditCorrelationId: task.auditCorrelationId,
+      escalationReason: 'policy_denial',
+    });
+    await this.auditEscalation('policy_denial', task, approval, 'error');
+    await this.sendLocalNotification({
+      topic: 'policy_denials',
+      severity: 'error',
+      title: 'Policy denial requires review',
+      body: approval.riskReason,
+      dedupeKey: `escalation:policy_denial:${task.id}`,
+      resource: { kind: 'task', id: task.id },
+      approvalId: approval.id,
+      auditCorrelationId: task.auditCorrelationId,
+    });
+    return approval;
+  }
+
   private requireTask(taskId: string): ControlPlaneTask {
     const task = this.repository.getTask(taskId);
     if (!task) {
@@ -679,6 +906,113 @@ export class ControlPlane {
         `task "${task.id}" already terminal (${task.state})`,
       );
     }
+  }
+
+  private async escalateTaskFailure(task: ControlPlaneTask, error: string): Promise<void> {
+    const existing = this.findEscalation('repeated_tool_failure', task.id);
+    if (existing) return;
+    const approval = await this.requestApproval({
+      sessionId: task.sessionId,
+      taskId: task.id,
+      toolCallId: task.id,
+      requestedBy: { id: 'system:control-plane', type: 'system' },
+      riskReason: `Tool "${task.tool}" failed after ${task.attempt} attempts: ${error}`,
+      proposedAction: `Review failed task for ${task.tool}`,
+      sourceEvidence: [{
+        kind: 'task_failure',
+        id: task.id,
+        summary: error,
+      }],
+      affectedResource: { kind: 'task', id: task.id },
+      timeoutAt: new Date(this.clock().getTime() + 15 * 60_000).toISOString(),
+      policyRule: task.capabilityCheck.policyId ?? 'runtime.failure',
+      auditCorrelationId: task.auditCorrelationId,
+      escalationReason: 'repeated_tool_failure',
+    });
+    await this.auditEscalation('repeated_tool_failure', task, approval, 'error');
+    await this.sendLocalNotification({
+      topic: 'failures',
+      severity: 'error',
+      title: 'Task failure requires review',
+      body: approval.riskReason,
+      dedupeKey: `escalation:repeated_tool_failure:${task.id}`,
+      resource: { kind: 'task', id: task.id },
+      approvalId: approval.id,
+      auditCorrelationId: task.auditCorrelationId,
+    });
+  }
+
+  private findEscalation(reason: string, taskId: string): ApprovalRequest | null {
+    return this.repository.listApprovals().find((approval) => (
+      approval.escalationReason === reason &&
+      approval.taskId === taskId &&
+      ['requested', 'viewed'].includes(approval.state)
+    )) ?? null;
+  }
+
+  private async auditApproval(
+    action: AuditAppendInput['action'],
+    approval: ApprovalRequest,
+    actor: Actor,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    await this.audit.append({
+      actor,
+      action,
+      resource: { kind: 'approval', id: approval.id },
+      data: {
+        ...data,
+        approvalId: approval.id,
+        sessionId: approval.sessionId,
+        taskId: approval.taskId,
+        toolCallId: approval.toolCallId,
+        auditCorrelationId: approval.auditCorrelationId,
+        state: approval.state,
+        policyRule: approval.policyRule,
+        affectedResource: approval.affectedResource,
+      },
+    });
+  }
+
+  private async auditEscalation(
+    reason: string,
+    task: ControlPlaneTask,
+    approval: ApprovalRequest,
+    severity: NotificationSeverity,
+  ): Promise<void> {
+    await this.audit.append({
+      actor: { id: 'system:control-plane', type: 'system' },
+      action: 'escalation.request',
+      resource: { kind: 'task', id: task.id },
+      data: {
+        reason,
+        sessionId: task.sessionId,
+        taskId: task.id,
+        approvalId: approval.id,
+        auditCorrelationId: task.auditCorrelationId,
+        severity,
+      },
+    });
+  }
+
+  private async sendLocalNotification(input: {
+    topic: NotificationTopic;
+    severity: NotificationSeverity;
+    title: string;
+    body: string;
+    dedupeKey: string;
+    resource: { kind: string; id: string };
+    approvalId: string | null;
+    auditCorrelationId: string;
+  }): Promise<void> {
+    const now = this.clock().toISOString();
+    const notification: LocalNotification = {
+      id: randomUUID(),
+      channel: 'local_dev',
+      createdAt: now,
+      ...input,
+    };
+    await this.repository.saveNotification(notification);
   }
 
   private async auditTask(

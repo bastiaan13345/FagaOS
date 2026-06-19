@@ -127,6 +127,69 @@ describe('@fagaos/control-plane HTTP transport', () => {
     expect(del.status).toBe(200);
   });
 
+  it('serves approval queue decisions and local-dev notifications', async () => {
+    const create = await request(base, 'POST', '/sessions', {
+      agentId: 'agent.test.echo',
+      createdBy: { id: 'user:alice', type: 'user' },
+      input: {},
+    });
+    const sessionId = create.body.session.id as string;
+
+    const taskResponse = await request(base, 'POST', '/tasks', {
+      sessionId,
+      tool: 'email.send',
+      arguments: { body: 'draft' },
+      createdBy: { id: 'agent.test.echo', type: 'agent' },
+      auditCorrelationId: 'corr-http-approval',
+      capabilityCheck: { ok: true, policyId: 'policy.email.send' },
+    });
+    const taskId = taskResponse.body.task.id as string;
+
+    const approvalResponse = await request(base, 'POST', '/approvals', {
+      sessionId,
+      taskId,
+      requestedBy: { id: 'agent.test.echo', type: 'agent' },
+      riskReason: 'External email send',
+      proposedAction: 'Send email',
+      sourceEvidence: [{ kind: 'message', id: 'm1', summary: 'user draft' }],
+      affectedResource: { kind: 'email.thread', id: 'thread-1' },
+      timeoutAt: '2026-06-19T13:00:00.000Z',
+      policyRule: 'policy.email.send',
+      auditCorrelationId: 'corr-http-approval',
+    });
+    expect(approvalResponse.status).toBe(200);
+    const approvalId = approvalResponse.body.approval.id as string;
+
+    const editResponse = await request(base, 'POST', `/approvals/${approvalId}/decision`, {
+      actor: { id: 'user:reviewer', type: 'user' },
+      decision: 'edit',
+      reason: 'remove sensitive detail',
+      editedAction: 'Send email without sensitive detail',
+    });
+    expect(editResponse.status).toBe(200);
+    expect(editResponse.body.approval).toMatchObject({
+      id: approvalId,
+      state: 'edited',
+      editedAction: 'Send email without sensitive detail',
+    });
+
+    const list = await request(base, 'GET', '/approvals');
+    expect(list.status).toBe(200);
+    expect(list.body.approvals).toEqual([
+      expect.objectContaining({ id: approvalId, state: 'edited' }),
+    ]);
+
+    const notifications = await request(base, 'GET', '/notifications');
+    expect(notifications.status).toBe(200);
+    expect(notifications.body.notifications).toEqual([
+      expect.objectContaining({
+        channel: 'local_dev',
+        topic: 'approvals',
+        approvalId,
+      }),
+    ]);
+  });
+
   it('returns 404 for an unknown session', async () => {
     const r = await request(base, 'GET', '/sessions/nope');
     expect(r.status).toBe(404);
