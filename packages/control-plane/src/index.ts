@@ -60,6 +60,33 @@ export {
   type ControlPlaneTaskState,
 } from './repository.js';
 
+/* ─────────────────────── Auth / Observability ──────────────────────────── */
+
+export {
+  authenticate,
+  authorize,
+  callerToActor,
+  hasRole,
+  type AuthConfig,
+  type CallerIdentity,
+  type CallerRole,
+  type AuthResult,
+} from './auth.js';
+
+export {
+  createLogger,
+  createMetrics,
+  createHealthChecker,
+  newCorrelationId,
+  type Logger,
+  type LogLevel,
+  type LogRecord,
+  type Metrics,
+  type MetricsSnapshot,
+  type HealthChecker,
+  type HealthStatus,
+} from './observability.js';
+
 /* ----------------------------- Tool gateway ------------------------------ */
 
 /**

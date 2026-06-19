@@ -31,6 +31,7 @@
     { "path": "./packages/policy" },
     { "path": "./packages/qa-harness" },
     { "path": "./packages/runtime" },
+    { "path": "./packages/ui-read-model" },
     { "path": "./packages/workspace-shell" },
     { "path": "./apps/control-plane-server" }
   ]
