@@ -11,7 +11,8 @@
     "./sandbox": "./dist/sandbox/index.js",
     "./contracts": "./dist/contracts/index.js",
     "./corpus": "./dist/corpus/index.js",
-    "./fixtures": "./dist/fixtures/index.js"
+    "./fixtures": "./dist/fixtures/index.js",
+    "./release-gates": "./dist/release-gates/index.js"
   },
   "scripts": {
     "build": "tsc -b",
