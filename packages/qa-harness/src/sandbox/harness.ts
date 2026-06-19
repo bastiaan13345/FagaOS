@@ -92,6 +92,7 @@ export function isHostnameAllowed(hostname: string, denylist: string[]): boolean
 
 const DEFAULTS = {
   timeoutMs: 5_000,
+  startupTimeoutMs: 5_000,
   memoryLimitMb: 256,
   suppressDeprecations: true,
   captureOutput: true,
@@ -114,6 +115,9 @@ export class SandboxHarness {
     const opts = { ...this.defaults, ...options };
     if (!Number.isFinite(opts.timeoutMs) || opts.timeoutMs <= 0) {
       throw new RangeError(`SandboxHarness.run: timeoutMs must be > 0, got ${opts.timeoutMs}`);
+    }
+    if (!Number.isFinite(opts.startupTimeoutMs) || opts.startupTimeoutMs <= 0) {
+      throw new RangeError(`SandboxHarness.run: startupTimeoutMs must be > 0, got ${opts.startupTimeoutMs}`);
     }
     if (opts.memoryLimitMb < 0) {
       throw new RangeError(`SandboxHarness.run: memoryLimitMb must be >= 0, got ${opts.memoryLimitMb}`);
@@ -181,6 +185,17 @@ export class SandboxHarness {
     let resultError: { name: string; message: string; stack?: string } | undefined;
     let protocolError: string | undefined;
     let resolved = false;
+    let didTimeout = false;
+    let killTimer: NodeJS.Timeout;
+    const start = Date.now();
+    killTimer = setTimeout(() => {
+      if (resolved) return;
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // best effort
+      }
+    }, opts.startupTimeoutMs);
 
     const handleLine = (line: string) => {
       let msg: { type: string; [k: string]: unknown };
@@ -193,6 +208,16 @@ export class SandboxHarness {
       switch (msg.type) {
         case 'ready':
           protocolReady = true;
+          clearTimeout(killTimer);
+          killTimer = setTimeout(() => {
+            if (resolved) return;
+            didTimeout = true;
+            try {
+              child.kill('SIGKILL');
+            } catch {
+              // best effort
+            }
+          }, opts.timeoutMs);
           // Send the function and args in a single message. Defer to a
           // microtask so we don't block the child's event loop while it
           // is still draining the ready write.
@@ -265,16 +290,6 @@ export class SandboxHarness {
       }
     });
 
-    const start = Date.now();
-    const killTimer = setTimeout(() => {
-      if (resolved) return;
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        // best effort
-      }
-    }, opts.timeoutMs);
-
     const exitInfo = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
       child.on('exit', (code, signal) => {
         clearTimeout(killTimer);
@@ -331,7 +346,7 @@ export class SandboxHarness {
     }
 
     // We had no error message — was it a timeout / crash / memory?
-    if (durationMs >= opts.timeoutMs) {
+    if (didTimeout) {
       return {
         reason: 'timeout',
         exitCode: exitInfo.code,

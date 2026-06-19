@@ -3,7 +3,18 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { SessionSchema, ToolInvocationRecordSchema, type Session, type ToolInvocationRecord } from './types.js';
+import {
+  ApprovalRequestSchema,
+  LocalNotificationSchema,
+  NotificationPreferenceSchema,
+  SessionSchema,
+  ToolInvocationRecordSchema,
+  type ApprovalRequest,
+  type LocalNotification,
+  type NotificationPreference,
+  type Session,
+  type ToolInvocationRecord,
+} from './types.js';
 
 export const ControlPlaneTaskStateSchema = z.enum([
   'queued',
@@ -51,6 +62,9 @@ const ControlPlaneRepositoryStateSchema = z.object({
   sessions: z.array(SessionSchema),
   tasks: z.array(ControlPlaneTaskSchema),
   toolInvocations: z.array(ToolInvocationRecordSchema),
+  approvals: z.array(ApprovalRequestSchema).default([]),
+  notificationPreferences: z.array(NotificationPreferenceSchema).default([]),
+  notifications: z.array(LocalNotificationSchema).default([]),
 });
 
 export interface ControlPlaneRepositoryState {
@@ -58,6 +72,9 @@ export interface ControlPlaneRepositoryState {
   sessions: Session[];
   tasks: ControlPlaneTask[];
   toolInvocations: ToolInvocationRecord[];
+  approvals: ApprovalRequest[];
+  notificationPreferences: NotificationPreference[];
+  notifications: LocalNotification[];
 }
 
 export interface ControlPlaneRepository {
@@ -70,6 +87,13 @@ export interface ControlPlaneRepository {
   saveTask(task: ControlPlaneTask): Promise<void>;
   listToolInvocations(): ToolInvocationRecord[];
   saveToolInvocation(record: ToolInvocationRecord): Promise<void>;
+  getApproval(id: string): ApprovalRequest | undefined;
+  listApprovals(): ApprovalRequest[];
+  saveApproval(approval: ApprovalRequest): Promise<void>;
+  listNotificationPreferences(): NotificationPreference[];
+  saveNotificationPreference(preference: NotificationPreference): Promise<void>;
+  listNotifications(): LocalNotification[];
+  saveNotification(notification: LocalNotification): Promise<void>;
 }
 
 function emptyState(): ControlPlaneRepositoryState {
@@ -78,6 +102,9 @@ function emptyState(): ControlPlaneRepositoryState {
     sessions: [],
     tasks: [],
     toolInvocations: [],
+    approvals: [],
+    notificationPreferences: [],
+    notifications: [],
   };
 }
 
@@ -97,6 +124,30 @@ function cloneState(state: ControlPlaneRepositoryState): ControlPlaneRepositoryS
       arguments: { ...r.arguments },
       result: r.result ? { ...r.result } : null,
     })),
+    approvals: state.approvals.map(copyApproval),
+    notificationPreferences: state.notificationPreferences.map((p) => ({
+      ...p,
+      channels: [...p.channels],
+    })),
+    notifications: state.notifications.map((n) => ({
+      ...n,
+      resource: { ...n.resource },
+    })),
+  };
+}
+
+function copyApproval(approval: ApprovalRequest): ApprovalRequest {
+  return {
+    ...approval,
+    requestedBy: { ...approval.requestedBy },
+    sourceEvidence: approval.sourceEvidence.map((evidence) => ({ ...evidence })),
+    affectedResource: { ...approval.affectedResource },
+    decision: approval.decision
+      ? {
+          ...approval.decision,
+          actor: { ...approval.decision.actor },
+        }
+      : null,
   };
 }
 
@@ -153,6 +204,51 @@ export class InMemoryControlPlaneRepository implements ControlPlaneRepository {
     await this.flush();
   }
 
+  getApproval(id: string): ApprovalRequest | undefined {
+    const approval = this.state.approvals.find((item) => item.id === id);
+    return approval ? copyApproval(approval) : undefined;
+  }
+
+  listApprovals(): ApprovalRequest[] {
+    return cloneState(this.state).approvals;
+  }
+
+  async saveApproval(approval: ApprovalRequest): Promise<void> {
+    const parsed = ApprovalRequestSchema.parse(approval);
+    this.upsert('approvals', parsed);
+    await this.flush();
+  }
+
+  listNotificationPreferences(): NotificationPreference[] {
+    return cloneState(this.state).notificationPreferences;
+  }
+
+  async saveNotificationPreference(preference: NotificationPreference): Promise<void> {
+    const parsed = NotificationPreferenceSchema.parse(preference);
+    const existing = this.state.notificationPreferences.findIndex(
+      (item) => item.topic === parsed.topic && item.severity === parsed.severity,
+    );
+    if (existing >= 0) {
+      this.state.notificationPreferences[existing] = parsed;
+    } else {
+      this.state.notificationPreferences = [...this.state.notificationPreferences, parsed];
+    }
+    await this.flush();
+  }
+
+  listNotifications(): LocalNotification[] {
+    return cloneState(this.state).notifications;
+  }
+
+  async saveNotification(notification: LocalNotification): Promise<void> {
+    const parsed = LocalNotificationSchema.parse(notification);
+    if (this.state.notifications.some((item) => item.dedupeKey === parsed.dedupeKey)) {
+      return;
+    }
+    this.state.notifications = [...this.state.notifications, parsed];
+    await this.flush();
+  }
+
   protected async flush(): Promise<void> {
     // In-memory repository has nothing to flush.
   }
@@ -161,7 +257,10 @@ export class InMemoryControlPlaneRepository implements ControlPlaneRepository {
     return cloneState(this.state);
   }
 
-  private upsert<T extends { id: string }>(key: 'sessions' | 'tasks', value: T): void {
+  private upsert<T extends { id: string }>(
+    key: 'sessions' | 'tasks' | 'approvals',
+    value: T,
+  ): void {
     const existing = this.state[key].findIndex((item) => item.id === value.id);
     if (existing >= 0) {
       this.state[key][existing] = value as never;

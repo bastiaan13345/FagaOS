@@ -15,14 +15,21 @@
  * generated module on disk, so we never `eval` user code in the parent.
  */
 
-/** Hard upper bound on how long a sandboxed call may run. */
 export interface SandboxOptions {
   /**
-   * Wall-clock timeout in milliseconds. If exceeded, the child process
-   * is killed and the result is `SandboxTimeoutError`.
+   * Wall-clock timeout in milliseconds for the function execution after
+   * the child runner has completed its startup handshake. If exceeded,
+   * the child process is killed and the result is `SandboxTimeoutError`.
    * Default: 5_000 ms. Must be > 0.
    */
   timeoutMs?: number;
+  /**
+   * Wall-clock timeout in milliseconds for the child runner to emit its
+   * initial ready protocol message. Startup failures are reported as
+   * protocol errors, keeping them distinct from function execution
+   * timeouts. Default: 5_000 ms. Must be > 0.
+   */
+  startupTimeoutMs?: number;
   /**
    * V8 old-space heap cap, in MiB, passed to `--max-old-space-size`.
    * Use 0 to skip the heap cap. Default: 256 MiB.

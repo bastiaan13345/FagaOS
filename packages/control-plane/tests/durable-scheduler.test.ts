@@ -50,6 +50,15 @@ function createControlPlane(filePath: string, clock: () => Date) {
 describe('@fagaos/control-plane — durable scheduler lifecycle', () => {
   let dir: string;
   let filePath: string;
+  const emptyRepositoryState = {
+    version: 1 as const,
+    sessions: [],
+    tasks: [],
+    toolInvocations: [],
+    approvals: [],
+    notificationPreferences: [],
+    notifications: [],
+  };
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'fagaos-control-plane-'));
@@ -215,17 +224,58 @@ describe('@fagaos/control-plane — durable scheduler lifecycle', () => {
 
   it('returns empty state for missing or empty state files and rejects malformed state', async () => {
     const missing = await loadControlPlaneRepositoryState(join(dir, 'missing.json'));
-    expect(missing).toEqual({ version: 1, sessions: [], tasks: [], toolInvocations: [] });
+    expect(missing).toEqual(emptyRepositoryState);
 
     const emptyPath = join(dir, 'empty.json');
     await writeFile(emptyPath, '', 'utf8');
     const empty = await loadControlPlaneRepositoryState(emptyPath);
-    expect(empty).toEqual({ version: 1, sessions: [], tasks: [], toolInvocations: [] });
+    expect(empty).toEqual(emptyRepositoryState);
+    const emptyRepository = new JsonFileControlPlaneRepository({ filePath: emptyPath });
+    expect(emptyRepository.listSessions()).toEqual([]);
 
     const malformedPath = join(dir, 'malformed.json');
     await writeFile(malformedPath, '{bad-json', 'utf8');
     await expect(loadControlPlaneRepositoryState(malformedPath)).rejects.toThrow();
     expect(() => new JsonFileControlPlaneRepository({ filePath: malformedPath })).toThrow();
+  });
+
+  it('upserts and defensively copies durable notification preferences', async () => {
+    const { controlPlane } = createControlPlane(filePath, createClock().clock);
+
+    await controlPlane.setNotificationPreference({
+      topic: 'approvals',
+      severity: 'warning',
+      channels: ['local_dev'],
+      enabled: true,
+    });
+    await controlPlane.setNotificationPreference({
+      topic: 'approvals',
+      severity: 'warning',
+      channels: ['local_dev'],
+      enabled: false,
+    });
+
+    const preferences = controlPlane.listNotificationPreferences();
+    preferences[0]!.channels.push('local_dev');
+
+    expect(controlPlane.listNotificationPreferences()).toEqual([
+      {
+        topic: 'approvals',
+        severity: 'warning',
+        channels: ['local_dev'],
+        enabled: false,
+      },
+    ]);
+
+    const restarted = createControlPlane(filePath, createClock().clock);
+    expect(restarted.controlPlane.listNotificationPreferences()).toEqual([
+      {
+        topic: 'approvals',
+        severity: 'warning',
+        channels: ['local_dev'],
+        enabled: false,
+      },
+    ]);
   });
 
   it('defensively copies repository records and reports misses without mutating stored state', async () => {

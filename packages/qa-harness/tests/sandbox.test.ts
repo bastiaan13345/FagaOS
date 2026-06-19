@@ -139,15 +139,21 @@ describe('SandboxHarness', () => {
     expect(['memory-limit', 'crashed', 'timeout']).toContain(res.reason);
   }, 30_000);
 
-  it('reports protocol-error when the child exits before sending ready', async () => {
-    // A timeoutMs shorter than the template's import + hook setup
-    // forces the parent to kill the child before 'ready' is sent.
-    // The harness then reports 'protocol-error' with a descriptive
-    // message.
+  it('classifies execution timeout after the child is ready', async () => {
     const res = await harness.run<void>(
       () => { for (;;) { Math.random(); } },
       [],
       { timeoutMs: 1 },
+    );
+    expect(res.reason).toBe('timeout');
+    expect(res.error?.name).toBe('SandboxTimeoutError');
+  }, 30_000);
+
+  it('reports protocol-error when the child exits before sending ready', async () => {
+    const res = await harness.run<void>(
+      () => 1,
+      [],
+      { env: { NODE_OPTIONS: '--invalid-node-option-for-startup-test' }, timeoutMs: 5_000 },
     );
     expect(res.reason).toBe('protocol-error');
     expect(res.error?.message).toMatch(/ready|protocol/i);
