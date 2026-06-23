@@ -22,13 +22,17 @@
   },
   "files": [],
   "references": [
-    { "path": "./packages/core" },
+    { "path": "./packages/agent-manifest" },
     { "path": "./packages/audit-log" },
-    { "path": "./packages/policy" },
-    { "path": "./packages/runtime" },
     { "path": "./packages/connectors" },
+    { "path": "./packages/control-plane" },
+    { "path": "./packages/core" },
     { "path": "./packages/desktop-bridge" },
+    { "path": "./packages/policy" },
+    { "path": "./packages/qa-harness" },
+    { "path": "./packages/runtime" },
     { "path": "./packages/ui-read-model" },
-    { "path": "./packages/qa-harness" }
+    { "path": "./packages/workspace-shell" },
+    { "path": "./apps/control-plane-server" }
   ]
 }

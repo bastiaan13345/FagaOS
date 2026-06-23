@@ -1,0 +1,20 @@
+{
+  "name": "@fagaos/workspace-shell",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fagaos/agent-manifest": "*",
+    "@fagaos/audit-log": "*",
+    "@fagaos/control-plane": "*"
+  }
+}
