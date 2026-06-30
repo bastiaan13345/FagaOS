@@ -10,11 +10,17 @@ import {
   terminateDesktopSession,
   type UiReadModelAdapter,
 } from '../src/index.js';
-import type { Account, Calendar, Event, Message } from '@fagaos/connectors';
+import type {
+  Account,
+  Calendar,
+  Conversation,
+  Event,
+  Message,
+} from '@fagaos/connectors';
 import type { AuditEntry } from '@fagaos/audit-log';
 import type { Session } from '@fagaos/control-plane';
 
-const baseAccount = {
+const readOnlyMailAccount = {
   id: 'acct-mail',
   user_id: 'user-1',
   provider: 'gmail',
@@ -24,6 +30,40 @@ const baseAccount = {
   status: 'active',
   created_at: '2026-01-01T00:00:00.000Z',
   updated_at: '2026-01-01T00:00:00.000Z',
+} satisfies Account;
+
+const writableMailAccount = {
+  ...readOnlyMailAccount,
+  id: 'acct-mail-writable',
+  capabilities: ['read_mail', 'send_mail'],
+} satisfies Account;
+
+const readOnlyCalendarAccount = {
+  ...readOnlyMailAccount,
+  id: 'acct-cal',
+  provider: 'google_calendar',
+  capabilities: ['list_events'],
+} satisfies Account;
+
+const writableCalendarAccount = {
+  ...readOnlyMailAccount,
+  id: 'acct-cal-writable',
+  provider: 'google_calendar',
+  capabilities: ['list_events', 'create_event'],
+} satisfies Account;
+
+const readOnlyDmAccount = {
+  ...readOnlyMailAccount,
+  id: 'acct-dm',
+  provider: 'whatsapp',
+  capabilities: ['list_conversations'],
+} satisfies Account;
+
+const writableDmAccount = {
+  ...readOnlyMailAccount,
+  id: 'acct-dm-writable',
+  provider: 'whatsapp',
+  capabilities: ['list_conversations', 'send_dm'],
 } satisfies Account;
 
 const message = {
@@ -44,13 +84,27 @@ const message = {
   provider_ref: { provider: 'gmail', native_id: 'native-msg-1' },
 } satisfies Message;
 
-const calendar = {
+const writableMessage = {
+  ...message,
+  id: 'msg-writable',
+  account_id: 'acct-mail-writable',
+  thread_id: 'thread-writable',
+} satisfies Message;
+
+const readOnlyCalendar = {
   id: 'cal-1',
   account_id: 'acct-cal',
   name: 'Work',
   primary: true,
   read_only: true,
   provider_ref: { provider: 'google_calendar', native_id: 'primary' },
+} satisfies Calendar;
+
+const writableCalendar = {
+  ...readOnlyCalendar,
+  id: 'cal-writable',
+  account_id: 'acct-cal-writable',
+  read_only: false,
 } satisfies Calendar;
 
 const event = {
@@ -65,6 +119,33 @@ const event = {
   status: 'confirmed',
   provider_ref: { provider: 'google_calendar', native_id: 'evt-1' },
 } satisfies Event;
+
+const writableEvent = {
+  ...event,
+  id: 'evt-writable',
+  account_id: 'acct-cal-writable',
+  calendar_id: 'cal-writable',
+} satisfies Event;
+
+const readOnlyConversation = {
+  id: 'conv-1',
+  account_id: 'acct-dm',
+  channel: 'whatsapp',
+  participants: [{ address: '+15555550100', name: 'Lead' }],
+  last_message_at: '2026-01-02T13:00:00.000Z',
+  unread_count: 1,
+  window_open_until: '2026-01-03T13:00:00.000Z',
+  preview: 'Sounds good',
+  provider_ref: { provider: 'whatsapp', native_id: 'native-conv-1' },
+} satisfies Conversation;
+
+const writableConversation = {
+  ...readOnlyConversation,
+  id: 'conv-writable',
+  account_id: 'acct-dm-writable',
+  last_message_at: '2026-01-02T14:00:00.000Z',
+  unread_count: 0,
+} satisfies Conversation;
 
 const session = {
   id: 'session-1',
@@ -112,9 +193,9 @@ const auditEntry = {
 } satisfies AuditEntry;
 
 describe('@fagaos/ui-read-model', () => {
-  it('builds a read-only inbox view with account filters and approval-required reply affordances', async () => {
+  it('builds a read-only inbox view with account filters and gates reply/draft on send_mail capability', async () => {
     const adapter = makeMockUiReadModelAdapter({
-      accounts: [baseAccount],
+      accounts: [readOnlyMailAccount],
       messages: [message],
     });
 
@@ -134,20 +215,111 @@ describe('@fagaos/ui-read-model', () => {
       subject: 'Proposal',
       unread: true,
     });
+    expect(view.threads[0]?.affordances.reply).toEqual({
+      enabled: false,
+      reason: 'read_only',
+    });
+    expect(view.threads[0]?.affordances.draft).toEqual({
+      enabled: false,
+      reason: 'read_only',
+    });
+    expect(view.conversations).toEqual([]);
+  });
+
+  it('emits approval-required reply and draft affordances for writable mail accounts', async () => {
+    const adapter = makeMockUiReadModelAdapter({
+      accounts: [writableMailAccount],
+      messages: [writableMessage],
+    });
+
+    const view = await buildInboxView(adapter, { accountIds: ['acct-mail-writable'] });
+
     expect(view.threads[0]?.affordances.reply).toMatchObject({
       enabled: false,
       reason: 'approval_required',
     });
     expect(view.threads[0]?.affordances.reply.approvalIntent).toMatchObject({
       action: 'mail.send',
-      accountId: 'acct-mail',
-      resourceId: 'thread-1',
+      accountId: 'acct-mail-writable',
+      resourceId: 'thread-writable',
     });
+    expect(view.threads[0]?.affordances.draft.approvalIntent).toMatchObject({
+      action: 'mail.send',
+    });
+  });
+
+  it('exposes DM conversation threads with channel, participants, and unread counts', async () => {
+    const adapter = makeMockUiReadModelAdapter({
+      accounts: [readOnlyDmAccount, writableDmAccount],
+      conversations: [readOnlyConversation, writableConversation],
+    });
+
+    const view = await buildInboxView(adapter);
+
+    expect(view.threads).toEqual([]);
+    expect(view.conversations).toHaveLength(2);
+    expect(view.conversations[0]).toMatchObject({
+      id: 'conv-writable',
+      accountId: 'acct-dm-writable',
+      channel: 'whatsapp',
+      participants: ['Lead'],
+      unreadCount: 0,
+      windowOpenUntil: '2026-01-03T13:00:00.000Z',
+    });
+    expect(view.conversations[1]).toMatchObject({
+      id: 'conv-1',
+      accountId: 'acct-dm',
+      channel: 'whatsapp',
+      unreadCount: 1,
+    });
+  });
+
+  it('gates DM reply affordances on send_dm capability', async () => {
+    const adapter = makeMockUiReadModelAdapter({
+      accounts: [readOnlyDmAccount, writableDmAccount],
+      conversations: [readOnlyConversation, writableConversation],
+    });
+
+    const view = await buildInboxView(adapter);
+
+    const readOnlyThread = view.conversations.find((c) => c.id === 'conv-1');
+    const writableThread = view.conversations.find((c) => c.id === 'conv-writable');
+    expect(readOnlyThread?.affordances.reply).toEqual({
+      enabled: false,
+      reason: 'read_only',
+    });
+    expect(readOnlyThread?.affordances.draft).toEqual({
+      enabled: false,
+      reason: 'read_only',
+    });
+    expect(writableThread?.affordances.reply).toMatchObject({
+      enabled: false,
+      reason: 'approval_required',
+    });
+    expect(writableThread?.affordances.reply.approvalIntent).toMatchObject({
+      action: 'dm.send',
+      accountId: 'acct-dm-writable',
+      resourceId: 'conv-writable',
+      payload: { conversationId: 'conv-writable', channel: 'whatsapp' },
+    });
+  });
+
+  it('filters conversations by accountIds when building the inbox view', async () => {
+    const adapter = makeMockUiReadModelAdapter({
+      accounts: [readOnlyDmAccount, writableDmAccount],
+      conversations: [readOnlyConversation, writableConversation],
+    });
+
+    const view = await buildInboxView(adapter, { accountIds: ['acct-dm-writable'] });
+
+    expect(view.conversations).toEqual([
+      expect.objectContaining({ id: 'conv-writable', accountId: 'acct-dm-writable' }),
+    ]);
   });
 
   it('surfaces reauth banners instead of dispatching connector behavior', async () => {
     const reauthAccount = {
-      ...baseAccount,
+      ...readOnlyMailAccount,
       id: 'acct-reauth',
       status: 'reauth_required',
     } satisfies Account;
@@ -167,19 +339,16 @@ describe('@fagaos/ui-read-model', () => {
         message: 'invalid_grant',
       },
     ]);
-    expect(view.threads[0]?.affordances.reply.enabled).toBe(false);
+    expect(view.threads[0]?.affordances.reply).toEqual({
+      enabled: false,
+      reason: 'reauth_required',
+    });
   });
 
-  it('builds calendar read models with free/busy and approval-required write actions', async () => {
-    const calendarAccount = {
-      ...baseAccount,
-      id: 'acct-cal',
-      provider: 'google_calendar',
-      capabilities: ['list_events'],
-    } satisfies Account;
+  it('builds calendar read models with free/busy and gates write actions on create_event + calendar.read_only', async () => {
     const adapter = makeMockUiReadModelAdapter({
-      accounts: [calendarAccount],
-      calendars: [calendar],
+      accounts: [readOnlyCalendarAccount],
+      calendars: [readOnlyCalendar],
       events: [event],
       freeBusy: [{ calendarId: 'cal-1', start: event.start.at, end: event.end.at, status: 'busy' }],
     });
@@ -191,14 +360,77 @@ describe('@fagaos/ui-read-model', () => {
 
     expect(view.calendars[0]).toMatchObject({ id: 'cal-1', readOnly: true });
     expect(view.events[0]).toMatchObject({ id: 'evt-1', title: 'Planning' });
+    expect(view.events[0]?.affordances.update).toEqual({
+      enabled: false,
+      reason: 'read_only',
+    });
     expect(view.freeBusy).toEqual([
       { calendarId: 'cal-1', start: event.start.at, end: event.end.at, status: 'busy' },
     ]);
+    expect(view.proposedActions).toEqual([]);
+  });
+
+  it('emits approval-required proposed actions and update intents for writable calendar accounts', async () => {
+    const adapter = makeMockUiReadModelAdapter({
+      accounts: [writableCalendarAccount],
+      calendars: [writableCalendar],
+      events: [writableEvent],
+      freeBusy: [
+        {
+          calendarId: 'cal-writable',
+          start: writableEvent.start.at,
+          end: writableEvent.end.at,
+          status: 'busy',
+        },
+      ],
+    });
+
+    const view = await buildCalendarView(adapter, {
+      timeMin: '2026-01-03T00:00:00.000Z',
+      timeMax: '2026-01-04T00:00:00.000Z',
+    });
+
+    expect(view.calendars[0]).toMatchObject({ id: 'cal-writable', readOnly: false });
+    expect(view.events[0]?.affordances.update).toMatchObject({
+      enabled: false,
+      reason: 'approval_required',
+    });
+    expect(view.events[0]?.affordances.update.approvalIntent).toMatchObject({
+      action: 'calendar.update_event',
+      accountId: 'acct-cal-writable',
+      resourceId: 'evt-writable',
+    });
     expect(view.proposedActions[0]).toMatchObject({
       action: 'calendar.create_event',
-      accountId: 'acct-cal',
+      accountId: 'acct-cal-writable',
       status: 'approval_required',
     });
+    expect(view.proposedActions[0]?.approvalIntent).toMatchObject({
+      action: 'calendar.create_event',
+      resourceId: 'cal-writable',
+    });
+  });
+
+  it('does not propose calendar.create_event for a writable account on a read_only calendar', async () => {
+    const writableAccountOnReadOnlyCalendar = {
+      ...writableCalendarAccount,
+      id: 'acct-cal-mix',
+    } satisfies Account;
+    const readOnlyCalendarForWritableAccount = {
+      ...readOnlyCalendar,
+      id: 'cal-mix',
+      account_id: 'acct-cal-mix',
+    } satisfies Calendar;
+    const adapter = makeMockUiReadModelAdapter({
+      accounts: [writableAccountOnReadOnlyCalendar],
+      calendars: [readOnlyCalendarForWritableAccount],
+      events: [],
+    });
+
+    const view = await buildCalendarView(adapter);
+
+    expect(view.proposedActions).toEqual([]);
+    expect(view.calendars[0]).toMatchObject({ id: 'cal-mix', readOnly: true });
   });
 
   it('builds desktop session controls and routes termination through the runtime adapter', async () => {
@@ -297,13 +529,15 @@ describe('@fagaos/ui-read-model', () => {
 
   it('works with a typed adapter boundary instead of direct provider/runtime calls', async () => {
     const adapter: UiReadModelAdapter = makeMockUiReadModelAdapter({
-      accounts: [baseAccount],
+      accounts: [readOnlyMailAccount],
       messages: [message],
+      conversations: [readOnlyConversation],
       auditEntries: [auditEntry],
     });
 
     await expect(adapter.listAccounts()).resolves.toHaveLength(1);
     await expect(adapter.listMessages({ accountIds: ['acct-mail'] })).resolves.toHaveLength(1);
+    await expect(adapter.listConversations({ accountIds: ['acct-dm'] })).resolves.toHaveLength(1);
     await expect(adapter.listAuditEntries()).resolves.toHaveLength(1);
   });
 });
