@@ -9,6 +9,7 @@ export default defineConfig({
       'packages/*/test/**/*.test.ts',
       'apps/*/tests/**/*.test.ts',
       'apps/*/test/**/*.test.ts',
+      'scripts/**/*.test.ts',
     ],
     coverage: {
       provider: 'v8',

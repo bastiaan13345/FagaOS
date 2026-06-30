@@ -5,6 +5,24 @@
   "type": "module",
   "description": "FagaOS control-plane HTTP server. Boots the API stubs from @fagaos/control-plane over a real TCP port, backed by the FAG-8 audit log primitive (via @fagaos/audit-log).",
   "main": "dist/main.js",
+  "deploy": {
+    "kind": "node-service",
+    "entrypoint": "dist/main.js",
+    "includes": [
+      "dist",
+      "package.json"
+    ],
+    "runtime": {
+      "node": ">=20.10.0",
+      "start": "node dist/main.js",
+      "health": "GET /healthz"
+    },
+    "environment": [
+      "HOST",
+      "PORT",
+      "FAGAOS_CONTROL_PLANE_STATE_FILE"
+    ]
+  },
   "scripts": {
     "build": "tsc -b",
     "start": "node dist/main.js",
