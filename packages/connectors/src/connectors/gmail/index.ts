@@ -1,10 +1,12 @@
 /**
- * Gmail connector (read-only).
+ * Gmail connector (read-only / production-write capable).
  *
  * Implements the operations Phase 1 cares about:
  *   - mail.list  → users.messages.list
  *   - mail.get   → users.messages.get
  *   - mail.send  → users.messages.send (skipped when read-only mode is on)
+ *   - mail.reply → users.messages.send with threadId + In-Reply-To
+ *   - mail.forward → users.messages.send with the original body prepended
  *   - dm.conversations.list → not applicable (mail-shaped), returns
  *                              an empty list
  *
@@ -15,6 +17,12 @@
  * notification and returns a normalised "mail changed" event. The
  * gateway translates that to a `users.history.list` call and merges
  * deltas into the local cache.
+ *
+ * Production OAuth: the `google_production_oauth.ts` helper covers the
+ * scope set, the consent URL, and the offline-access prompt that
+ * unlocks the refresh token. Tokens minted in production carry the
+ * `gmail_send` scope for the write path; the connector is constructed
+ * with `read_only: false` in that mode.
  *
  * Tests inject a `fetch` implementation. Production uses
  * `globalThis.fetch`; the connector never reaches for a private HTTP
@@ -29,16 +37,28 @@ import type {
   ConnectorRequest,
   DmConversationsListResult,
   DmSendResult,
+  EventCreateResult,
+  EventDeleteResult,
   EventGetResult,
+  EventUpdateResult,
   EventsListResult,
+  MailForwardResult,
   MailGetResult,
   MailListResult,
+  MailReplyResult,
   MailSendResult,
 } from '../../connector.js';
 import { MessageSchema, type Message } from '../../models/schemas.js';
 import { z } from 'zod';
 import type { GoogleTokenProvider } from '../../oauth/google.js';
-import { MailListArgsSchema, MailGetArgsSchema, MailSendArgsSchema, DmListArgsSchema } from '../stub/email.js';
+import {
+  MailListArgsSchema,
+  MailGetArgsSchema,
+  MailSendArgsSchema,
+  MailReplyArgsSchema,
+  MailForwardArgsSchema,
+  DmListArgsSchema,
+} from '../stub/email.js';
 
 const GMAIL_API = 'https://gmail.googleapis.com/gmail/v1';
 
@@ -77,6 +97,8 @@ export class GmailConnector implements Connector {
   readonly operations = [
     'mail.list',
     'mail.send',
+    'mail.reply',
+    'mail.forward',
     'mail.get',
     'dm.conversations.list',
     'dm.send',
@@ -163,12 +185,124 @@ export class GmailConnector implements Connector {
     return { provider_message_id: out.id, thread_id: out.threadId };
   }
 
+  async replyMessage(request: ConnectorRequest, _audit: AuditLog): Promise<MailReplyResult> {
+    if (this.readOnly) {
+      throw new ConnectorError('forbidden', 'GmailConnector is in read-only mode for this build');
+    }
+    const args = MailReplyArgsSchema.parse(request.args);
+    const token = await this.tokens.accessToken({
+      account_id: request.account.id,
+      scopes: [
+        'https://www.googleapis.com/auth/gmail.readonly',
+        'https://www.googleapis.com/auth/gmail.send',
+      ],
+    });
+    const original = await this.gmailGet<GmailMessage>(
+      `${this.apiBase}/users/me/messages/${encodeURIComponent(args.message_id)}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Subject&metadataHeaders=Message-ID&metadataHeaders=Date`,
+      token,
+    );
+    const headers = Object.fromEntries(
+      (original.payload?.headers ?? []).map((h) => [h.name.toLowerCase(), h.value]),
+    );
+    const replyTo = parseAddress(headers['from'] ?? '');
+    const ccList = args.reply_all
+      ? parseAddressList((headers['cc'] ?? '') + ',' + (headers['to'] ?? ''))
+          .map((c) => c.address)
+          .filter((a) => a && a !== request.account.handle)
+      : [];
+    const subjectHeader = headers['subject'] ?? '';
+    const subject = subjectHeader.toLowerCase().startsWith('re:')
+      ? subjectHeader
+      : `Re: ${subjectHeader}`;
+    const inReplyTo = headers['message-id'] ?? '';
+    const references = [headers['references'] ?? '', inReplyTo].filter(Boolean).join(' ').trim();
+    const raw = buildRawMessage({
+      from: request.account.handle,
+      to: [replyTo.address],
+      subject,
+      body: args.body,
+      extraHeaders: [
+        ...(inReplyTo ? [`In-Reply-To: ${inReplyTo}`] : []),
+        ...(references ? [`References: ${references}`] : []),
+        ...ccList.map((addr) => `Cc: ${addr}`),
+      ],
+    });
+    const params = new URLSearchParams({ raw, threadId: original.threadId ?? '' });
+    const res = await this.fetchImpl(`${this.apiBase}/users/me/messages/send?${params.toString()}`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: '',
+    });
+    if (!res.ok) {
+      throw new ConnectorError('provider_error', `gmail reply failed: ${res.status} ${res.statusText}`, await safeText(res));
+    }
+    const out = (await res.json()) as { id: string; threadId: string };
+    return { provider_message_id: out.id, thread_id: out.threadId };
+  }
+
+  async forwardMessage(request: ConnectorRequest, _audit: AuditLog): Promise<MailForwardResult> {
+    if (this.readOnly) {
+      throw new ConnectorError('forbidden', 'GmailConnector is in read-only mode for this build');
+    }
+    const args = MailForwardArgsSchema.parse(request.args);
+    const token = await this.tokens.accessToken({
+      account_id: request.account.id,
+      scopes: [
+        'https://www.googleapis.com/auth/gmail.readonly',
+        'https://www.googleapis.com/auth/gmail.send',
+      ],
+    });
+    const original = await this.gmailGet<GmailMessage>(
+      `${this.apiBase}/users/me/messages/${encodeURIComponent(args.message_id)}?format=raw`,
+      token,
+    );
+    const originalText = decodeRaw((original as unknown as { raw?: string }).raw ?? '');
+    const headers = Object.fromEntries(
+      (original.payload?.headers ?? []).map((h) => [h.name.toLowerCase(), h.value]),
+    );
+    const subjectHeader = headers['subject'] ?? '';
+    const subject = subjectHeader.toLowerCase().startsWith('fwd:')
+      ? subjectHeader
+      : `Fwd: ${subjectHeader}`;
+    const forwardedBody = [
+      args.body,
+      '',
+      '---------- Forwarded message ----------',
+      `From: ${headers['from'] ?? ''}`,
+      `Date: ${headers['date'] ?? ''}`,
+      `Subject: ${headers['subject'] ?? ''}`,
+      `To: ${headers['to'] ?? ''}`,
+      '',
+      originalText,
+    ].join('\n');
+    const raw = buildRawMessage({
+      from: request.account.handle,
+      to: args.to,
+      subject,
+      body: forwardedBody,
+    });
+    const res = await this.fetchImpl(`${this.apiBase}/users/me/messages/send`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({ raw }).toString(),
+    });
+    if (!res.ok) {
+      throw new ConnectorError('provider_error', `gmail forward failed: ${res.status} ${res.statusText}`, await safeText(res));
+    }
+    const out = (await res.json()) as { id: string; threadId: string };
+    return { provider_message_id: out.id };
+  }
+
   async listConversations(
     request: ConnectorRequest,
     _audit: AuditLog,
   ): Promise<DmConversationsListResult> {
-    // Gmail is mail-shaped; there are no DM conversations to surface.
-    // Parse args for parity with the stub, then return an empty list.
     DmListArgsSchema.parse(request.args);
     void request;
     return { conversations: [], next_page_token: null };
@@ -187,17 +321,20 @@ export class GmailConnector implements Connector {
   async getEvent(): Promise<EventGetResult> {
     throw new ConnectorError('not_found', 'GmailConnector does not implement calendar operations');
   }
+  async createEvent(): Promise<EventCreateResult> {
+    throw new ConnectorError('not_found', 'GmailConnector does not implement calendar operations');
+  }
+  async updateEvent(): Promise<EventUpdateResult> {
+    throw new ConnectorError('not_found', 'GmailConnector does not implement calendar operations');
+  }
+  async deleteEvent(): Promise<EventDeleteResult> {
+    throw new ConnectorError('not_found', 'GmailConnector does not implement calendar operations');
+  }
 
   // -------------------------------------------------------------------------
   // Push / history — backstop
   // -------------------------------------------------------------------------
 
-  /**
-   * Decode a Pub/Sub push notification. The `data` field is
-   * base64url-encoded JSON; the connector returns the parsed
-   * `GmailHistory` so the gateway can drive a `users.history.list`
-   * backfill. Throws `webhook_payload_invalid` on parse failure.
-   */
   processPubSubMessage(notification: unknown): GmailHistory {
     const parsed = PubSubNotificationSchema.safeParse(notification);
     if (!parsed.success) {
@@ -222,13 +359,6 @@ export class GmailConnector implements Connector {
     return hist.data;
   }
 
-  /**
-   * `users.history.list` backfill. The caller supplies the
-   * `startHistoryId` it stored when the last sync completed; the
-   * connector returns the latest `historyId` and the union of
-   * `messagesAdded`/`messagesDeleted` ids. The gateway is responsible
-   * for fetching the actual message bodies in a follow-up call.
-   */
   async listHistory(
     account_id: string,
     start_history_id: string,
@@ -378,12 +508,14 @@ function buildRawMessage(input: {
   to: string[];
   subject: string;
   body: string;
+  extraHeaders?: string[];
 }): string {
   const headers = [
     `From: ${input.from}`,
     `To: ${input.to.join(', ')}`,
     `Subject: ${input.subject}`,
     `Content-Type: text/plain; charset="UTF-8"`,
+    ...(input.extraHeaders ?? []),
     '',
     input.body,
   ].join('\r\n');
@@ -392,6 +524,14 @@ function buildRawMessage(input: {
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=+$/, '');
+}
+
+function decodeRaw(raw: string): string {
+  if (!raw) return '';
+  const padded = raw.replace(/-/g, '+').replace(/_/g, '/');
+  const decoded = Buffer.from(padded, 'base64').toString('utf8');
+  const idx = decoded.indexOf('\r\n\r\n');
+  return idx === -1 ? decoded : decoded.slice(idx + 4);
 }
 
 async function safeText(res: Response): Promise<string> {

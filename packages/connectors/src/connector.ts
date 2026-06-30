@@ -79,6 +79,17 @@ export interface MailSendResult {
   thread_id: string | null;
 }
 
+/** Mail reply result. */
+export interface MailReplyResult {
+  provider_message_id: string;
+  thread_id: string;
+}
+
+/** Mail forward result. */
+export interface MailForwardResult {
+  provider_message_id: string;
+}
+
 /** Read-only conversation list. */
 export interface DmConversationsListResult {
   conversations: Conversation[];
@@ -111,6 +122,19 @@ export interface EventGetResult {
   event: Event;
 }
 
+/** Calendar event create result. */
+export interface EventCreateResult {
+  event: Event;
+}
+
+/** Calendar event update result. */
+export interface EventUpdateResult {
+  event: Event;
+}
+
+/** Calendar event delete result. */
+export type EventDeleteResult = void;
+
 /**
  * The connector contract. Every method corresponds 1:1 with a
  * `ConnectorOperation`. The gateway is the only caller.
@@ -130,6 +154,10 @@ export interface Connector {
   getMessage(request: ConnectorRequest, audit: AuditLog): Promise<MailGetResult>;
   /** Mail send. Read-only mode in this issue; the stub returns a deterministic id. */
   sendMessage(request: ConnectorRequest, audit: AuditLog): Promise<MailSendResult>;
+  /** Mail reply (in-thread). */
+  replyMessage(request: ConnectorRequest, audit: AuditLog): Promise<MailReplyResult>;
+  /** Mail forward (cross-thread). */
+  forwardMessage(request: ConnectorRequest, audit: AuditLog): Promise<MailForwardResult>;
 
   /** DM conversations list. */
   listConversations(
@@ -145,4 +173,10 @@ export interface Connector {
   listEvents(request: ConnectorRequest, audit: AuditLog): Promise<EventsListResult>;
   /** Calendar: get one event. */
   getEvent(request: ConnectorRequest, audit: AuditLog): Promise<EventGetResult>;
+  /** Calendar: create an event. */
+  createEvent(request: ConnectorRequest, audit: AuditLog): Promise<EventCreateResult>;
+  /** Calendar: update an existing event (etag/if-match). */
+  updateEvent(request: ConnectorRequest, audit: AuditLog): Promise<EventUpdateResult>;
+  /** Calendar: delete an event. */
+  deleteEvent(request: ConnectorRequest, audit: AuditLog): Promise<EventDeleteResult>;
 }

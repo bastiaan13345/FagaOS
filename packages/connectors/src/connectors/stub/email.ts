@@ -17,10 +17,15 @@ import type {
   ConnectorRequest,
   DmConversationsListResult,
   DmSendResult,
+  EventCreateResult,
+  EventDeleteResult,
   EventGetResult,
+  EventUpdateResult,
   EventsListResult,
+  MailForwardResult,
   MailGetResult,
   MailListResult,
+  MailReplyResult,
   MailSendResult,
 } from '../../connector.js';
 import {
@@ -61,6 +66,20 @@ export const MailSendArgsSchema = z.object({
 });
 export type MailSendArgs = z.infer<typeof MailSendArgsSchema>;
 
+export const MailReplyArgsSchema = z.object({
+  message_id: z.string().min(1),
+  body: z.string().min(1),
+  reply_all: z.boolean().default(false),
+});
+export type MailReplyArgs = z.infer<typeof MailReplyArgsSchema>;
+
+export const MailForwardArgsSchema = z.object({
+  message_id: z.string().min(1),
+  to: z.array(z.string().email()).min(1),
+  body: z.string().default(''),
+});
+export type MailForwardArgs = z.infer<typeof MailForwardArgsSchema>;
+
 export const DmListArgsSchema = z.object({
   channel: z.enum(['sms', 'whatsapp', 'instagram', 'telegram', 'discord', 'slack']).default('sms'),
   limit: z.number().int().positive().max(100).default(20),
@@ -85,6 +104,8 @@ export class StubEmailConnector implements Connector {
     'mail.list',
     'mail.get',
     'mail.send',
+    'mail.reply',
+    'mail.forward',
     'dm.conversations.list',
     'dm.send',
   ] as const;
@@ -105,8 +126,6 @@ export class StubEmailConnector implements Connector {
     _audit: AuditLog,
   ): Promise<MailGetResult> {
     const args = MailGetArgsSchema.parse(request.args);
-    // Derive an index from the message_id so the same id always
-    // returns the same fixture.
     const idx = stableIndex(args.message_id, 0, 4);
     return { message: this.fakeMessage(request.account, idx) };
   }
@@ -121,6 +140,30 @@ export class StubEmailConnector implements Connector {
       .digest('hex')
       .slice(0, 16);
     return { provider_message_id: `stub-msg-${id}`, thread_id: args.thread_id };
+  }
+
+  async replyMessage(
+    request: ConnectorRequest<MailReplyArgs>,
+    _audit: AuditLog,
+  ): Promise<MailReplyResult> {
+    const args = MailReplyArgsSchema.parse(request.args);
+    const id = createHash('sha256')
+      .update(`stub-reply|${request.account.id}|${args.message_id}|${args.body}|${args.reply_all}`)
+      .digest('hex')
+      .slice(0, 16);
+    return { provider_message_id: `stub-reply-${id}`, thread_id: `stub-thread-${args.message_id}` };
+  }
+
+  async forwardMessage(
+    request: ConnectorRequest<MailForwardArgs>,
+    _audit: AuditLog,
+  ): Promise<MailForwardResult> {
+    const args = MailForwardArgsSchema.parse(request.args);
+    const id = createHash('sha256')
+      .update(`stub-fwd|${request.account.id}|${args.message_id}|${args.to.join(',')}|${args.body}`)
+      .digest('hex')
+      .slice(0, 16);
+    return { provider_message_id: `stub-fwd-${id}` };
   }
 
   async listConversations(
@@ -156,6 +199,15 @@ export class StubEmailConnector implements Connector {
     throw new ConnectorError('not_found', 'StubEmailConnector does not implement calendar operations');
   }
   async getEvent(): Promise<EventGetResult> {
+    throw new ConnectorError('not_found', 'StubEmailConnector does not implement calendar operations');
+  }
+  async createEvent(): Promise<EventCreateResult> {
+    throw new ConnectorError('not_found', 'StubEmailConnector does not implement calendar operations');
+  }
+  async updateEvent(): Promise<EventUpdateResult> {
+    throw new ConnectorError('not_found', 'StubEmailConnector does not implement calendar operations');
+  }
+  async deleteEvent(): Promise<EventDeleteResult> {
     throw new ConnectorError('not_found', 'StubEmailConnector does not implement calendar operations');
   }
 

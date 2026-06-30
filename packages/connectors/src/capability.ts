@@ -18,11 +18,16 @@ export const ConnectorOperationSchema = z.enum([
   'mail.list',
   'mail.get',
   'mail.send',
+  'mail.reply',
+  'mail.forward',
   'dm.conversations.list',
   'dm.send',
   'calendar.calendars.list',
   'calendar.events.list',
   'calendar.events.get',
+  'calendar.events.create',
+  'calendar.events.update',
+  'calendar.events.delete',
 ]);
 export type ConnectorOperation = z.infer<typeof ConnectorOperationSchema>;
 
