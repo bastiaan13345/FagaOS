@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 import { access, readdir, readFile } from 'node:fs/promises';
-import { join, relative } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 type DeployKind = 'node-service' | 'node-library';
@@ -57,7 +57,8 @@ function requireDeployKind(value: unknown, packageName: string): DeployKind {
 async function assertPathExists(root: string, workspacePath: string, artifactPath: string, label: string, packageName: string) {
   const fullPath = join(root, workspacePath, artifactPath);
   if (!(await pathExists(fullPath))) {
-    throw new Error(`${packageName} ${label} does not exist: ${relative(root, fullPath)}`);
+    const displayPath = relative(root, fullPath).split(sep).join('/');
+    throw new Error(`${packageName} ${label} does not exist: ${displayPath}`);
   }
 }
 
