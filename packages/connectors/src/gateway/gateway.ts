@@ -24,6 +24,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import type { AuditLog } from '@fagaos/core';
+import type { CapabilityVerifier as PolicyCapabilityVerifier, VerifyResult } from '@fagaos/policy';
 import { ConnectorError, ConnectorNotRegisteredError } from '../errors.js';
 import type { Connector, ConnectorRequest } from '../connector.js';
 import type { CapabilityToken, ConnectorOperation } from '../capability.js';
@@ -47,6 +48,13 @@ export interface MailListInput {
   args: { query?: string; limit?: number; page_token?: string | null };
   idempotency_key?: string;
   trace_id?: string;
+  /**
+   * FAG-24: when the gateway is configured with a `capabilityVerifier`,
+   * the caller must also supply a signed policy token. The gateway
+   * runs the full crypto + policy check on this token in addition
+   * to the structural pre-check on `token`.
+   */
+  policyToken?: PolicyCapabilityToken;
 }
 export interface MailGetInput {
   token: CapabilityToken;
@@ -54,6 +62,7 @@ export interface MailGetInput {
   args: { message_id: string };
   idempotency_key?: string;
   trace_id?: string;
+  policyToken?: PolicyCapabilityToken;
 }
 export interface MailSendInput {
   token: CapabilityToken;
@@ -66,6 +75,7 @@ export interface MailSendInput {
   };
   idempotency_key?: string;
   trace_id?: string;
+  policyToken?: PolicyCapabilityToken;
 }
 export interface DmConversationsListInput {
   token: CapabilityToken;
@@ -73,6 +83,7 @@ export interface DmConversationsListInput {
   args: { channel?: 'sms' | 'whatsapp' | 'instagram' | 'telegram' | 'discord' | 'slack'; limit?: number };
   idempotency_key?: string;
   trace_id?: string;
+  policyToken?: PolicyCapabilityToken;
 }
 export interface DmSendInput {
   token: CapabilityToken;
@@ -80,6 +91,7 @@ export interface DmSendInput {
   args: { conversation_id: string; body: string };
   idempotency_key?: string;
   trace_id?: string;
+  policyToken?: PolicyCapabilityToken;
 }
 export interface CalendarsListInput {
   token: CapabilityToken;
@@ -87,6 +99,7 @@ export interface CalendarsListInput {
   args?: Record<string, never>;
   idempotency_key?: string;
   trace_id?: string;
+  policyToken?: PolicyCapabilityToken;
 }
 export interface EventsListInput {
   token: CapabilityToken;
@@ -100,7 +113,11 @@ export interface EventsListInput {
   };
   idempotency_key?: string;
   trace_id?: string;
+  policyToken?: PolicyCapabilityToken;
 }
+
+/** FAG-24 — the canonical, signed policy-package capability token. */
+type PolicyCapabilityToken = import('@fagaos/policy').CapabilityToken;
 
 // ---------------------------------------------------------------------------
 // Gateway options
@@ -121,6 +138,21 @@ export interface ConnectorGatewayOptions {
   connectors: Map<Provider, Connector>;
   /** Clock for tests / deterministic runs. */
   clock?: () => Date;
+  /**
+   * Optional FAG-24 capability verifier. When supplied, the
+   * gateway runs the full crypto + policy check (signature,
+   * expiry, key id, published policy decision) in addition to
+   * the structural `tokenAuthorizes` pre-check. When absent, the
+   * gateway falls back to the structural check only — the
+   * pre-FAG-24 behaviour.
+   */
+  capabilityVerifier?: PolicyCapabilityVerifier;
+  /**
+   * Workspace id the verifier is bound to. Only consulted when
+   * `capabilityVerifier` is set. Tokens whose body.workspaceId
+   * does not match are rejected.
+   */
+  workspaceId?: string;
 }
 
 export class ConnectorGateway {
@@ -132,6 +164,8 @@ export class ConnectorGateway {
   private readonly connectors: Map<Provider, Connector>;
   private readonly clock: () => Date;
   private readonly budgets = new Map<string, RateLimitBudget>();
+  private readonly capabilityVerifier: PolicyCapabilityVerifier | undefined;
+  private readonly workspaceId: string | undefined;
 
   constructor(opts: ConnectorGatewayOptions) {
     this.audit = opts.audit;
@@ -141,6 +175,8 @@ export class ConnectorGateway {
     this.features = opts.features;
     this.connectors = opts.connectors;
     this.clock = opts.clock ?? (() => new Date());
+    this.capabilityVerifier = opts.capabilityVerifier;
+    this.workspaceId = opts.workspaceId;
   }
 
   // -------------------------------------------------------------------------
@@ -233,6 +269,36 @@ export class ConnectorGateway {
         resource: { type: 'connector.account', id: account.id },
       });
       throw new ConnectorError('forbidden', `token does not authorise connector.${account.provider}.${operation} on account ${account.id}`);
+    }
+
+    if (this.capabilityVerifier) {
+      if (!input.policyToken) {
+        await this.audit.append({
+          actor: { id: input.token.subject },
+          action: { name: `connector.${account.provider}.${operation}`, outcome: 'deny' },
+          resource: { type: 'connector.account', id: account.id },
+          payload: { reason: 'no_policy_token', verifier: 'fagaos.policy' },
+        });
+        throw new ConnectorError('forbidden', 'policy verifier is configured but no policyToken was supplied');
+      }
+      const verifierResult: VerifyResult = await this.capabilityVerifier.verify({
+        token: input.policyToken,
+        request: {
+          actor: { id: input.token.subject },
+          action: { namespace: 'connector', name: operation },
+          resource: { type: 'connector.account', id: account.id },
+          context: { provider: account.provider, workspaceId: this.workspaceId ?? 'unknown' },
+        },
+      });
+      if (!verifierResult.ok) {
+        await this.audit.append({
+          actor: { id: input.token.subject },
+          action: { name: `connector.${account.provider}.${operation}`, outcome: 'deny' },
+          resource: { type: 'connector.account', id: account.id },
+          payload: { reason: verifierResult.code, detail: verifierResult.message, verifier: 'fagaos.policy' },
+        });
+        throw new ConnectorError('forbidden', `policy verifier rejected the call: ${verifierResult.message} (${verifierResult.code})`);
+      }
     }
     const connector = this.connectors.get(account.provider);
     if (!connector) {

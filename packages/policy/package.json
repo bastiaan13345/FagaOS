@@ -1,14 +1,19 @@
 {
   "name": "@fagaos/policy",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
+  "description": "@fagaos/policy — FagaOS policy engine, secret store, and capability token mint/verify (FAG-24).",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
     ".": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc -b"
+    "build": "tsc -b",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "zod": "^3.23.0"
   }
 }
