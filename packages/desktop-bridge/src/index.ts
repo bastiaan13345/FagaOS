@@ -29,6 +29,13 @@ export interface BridgeCapabilityRequest {
   sessionId?: string;
   appId?: string;
   resource?: Record<string, unknown>;
+  /**
+   * FAG-24 — the signed policy capability token. Optional because
+   * the bridge's allow-list verifier does not require it; required
+   * by `createPolicyCapabilityVerifier` for the full crypto + policy
+   * path.
+   */
+  token?: import('@fagaos/policy').CapabilityToken;
 }
 
 export interface BridgeCapabilityDecision {
@@ -67,6 +74,10 @@ export interface DesktopSession {
 export interface CreateSessionInput {
   appId: string;
   timeoutMs?: number;
+  /**
+   * FAG-24 — the signed policy capability token for this call.
+   */
+  token?: import('@fagaos/policy').CapabilityToken;
   auditCorrelationId?: string;
 }
 
@@ -130,6 +141,13 @@ export type MouseButton = 'left' | 'middle' | 'right';
 
 export interface BridgeOperationOptions {
   auditCorrelationId?: string;
+  /**
+   * FAG-24 — the signed policy capability token for this call.
+   * The bridge threads it to the capability verifier, which uses
+   * it for the full crypto + policy check. Optional so the
+   * allow-list verifier still works without it.
+   */
+  token?: import('@fagaos/policy').CapabilityToken;
 }
 
 export type SupportedRuntimeTarget = 'linux-x11-cdp' | 'macos-xctest-cdp' | 'windows-uia-cdp';
@@ -268,6 +286,47 @@ export function createAllowListCapabilityVerifier(
   );
 }
 
+/**
+ * FAG-24 — build a `CapabilityVerifier` for the desktop-bridge that
+ * runs the full crypto + policy check on a supplied policy token.
+ *
+ * The returned function reads `token` from the bridge's
+ * `BridgeCapabilityRequest`. If no token is supplied, the call is
+ * denied with `no_capability_token`. Otherwise the function asks the
+ * policy engine to verify the token against the requested operation
+ * and the bridge session's resource id.
+ *
+ * Pair with `createAllowListCapabilityVerifier` for defence in depth:
+ * the bridge's `LocalDesktopBridge` already runs the allow-list
+ * check first via `requireCapability`; this verifier augments it
+ * with crypto + policy enforcement.
+ */
+export function createPolicyCapabilityVerifier(deps: {
+  policyVerifier: import('@fagaos/policy').CapabilityVerifier;
+  workspaceId: string;
+}): CapabilityVerifier {
+  return async (request) => {
+    if (!request.token) {
+      return { allow: false, reason: 'no_capability_token' };
+    }
+    const r = await deps.policyVerifier.verify({
+      token: request.token,
+      request: {
+        actor: { id: request.actor.id },
+        action: { namespace: 'desktop', name: request.operation },
+        resource: { type: 'desktop.session', id: request.sessionId ?? 'unknown' },
+        context: {
+          ...(request.appId ? { appId: request.appId } : {}),
+          ...(request.resource ?? {}),
+          workspaceId: deps.workspaceId,
+        },
+      },
+    });
+    if (r.ok) return { allow: true };
+    return { allow: false, reason: `policy:${r.code}:${r.message}` };
+  };
+}
+
 export const denyAllNetworkPolicy: NetworkPolicy = () => ({
   allow: false,
   reason: 'network_denied_by_default',
@@ -342,7 +401,7 @@ export class LocalDesktopBridge implements DesktopBridge {
   async createSession(input: CreateSessionInput): Promise<DesktopSession> {
     const appId = requireNonEmpty(input.appId, 'appId');
     const resource = operationResource(input);
-    await this.requireCapability('session.create', compactObject({ appId, resource }));
+    await this.requireCapability('session.create', compactObject({ appId, resource, ...(input.token ? { token: input.token } : {}) }));
     const id = `desk_${randomUUID()}`;
     const sessionRoot = join(this.sandboxRoot, id);
     const profileDir = join(sessionRoot, 'profile');
@@ -385,7 +444,7 @@ export class LocalDesktopBridge implements DesktopBridge {
   }
 
   async inspectSession(sessionId: string, options: BridgeOperationOptions = {}): Promise<DesktopSessionInspection> {
-    const record = await this.requireRecord(sessionId, 'session.inspect', { allowTerminated: true }, operationResource(options));
+    const record = await this.requireRecord(sessionId, 'session.inspect', { allowTerminated: true, ...(options.token ? { token: options.token } : {}) }, operationResource(options));
     if (record.session.status === 'timed_out') {
       throw new TimeoutError(`session ${sessionId} timed out`);
     }
@@ -403,7 +462,7 @@ export class LocalDesktopBridge implements DesktopBridge {
   }
 
   async terminateSession(sessionId: string, options: BridgeOperationOptions = {}): Promise<void> {
-    const record = await this.requireRecord(sessionId, 'session.terminate', { allowTerminated: true }, operationResource(options));
+    const record = await this.requireRecord(sessionId, 'session.terminate', { allowTerminated: true, ...(options.token ? { token: options.token } : {}) }, operationResource(options));
     await this.cleanupRecord(record, 'terminated');
     await this.audit('session.terminate', 'ok', record.session, {
       appId: record.session.appId,
@@ -413,7 +472,7 @@ export class LocalDesktopBridge implements DesktopBridge {
   }
 
   async captureScreenshot(input: { sessionId: string } & BridgeOperationOptions): Promise<ScreenshotResult> {
-    const record = await this.requireActiveRecord(input.sessionId, 'screenshot.capture', operationResource(input));
+    const record = await this.requireActiveRecord(input.sessionId, 'screenshot.capture', operationResource(input), input.token);
     const captureScreenshot = this.requireDesktopAdapterMethod('captureScreenshot', 'screenshot.capture');
     const result = await captureScreenshot?.({
       session: copySession(record.session),
@@ -442,7 +501,7 @@ export class LocalDesktopBridge implements DesktopBridge {
     const record = await this.requireActiveRecord(input.sessionId, 'mouse.click', operationResource({
       ...input,
       button,
-    }));
+    }), input.token);
     const clickMouse = this.requireDesktopAdapterMethod('clickMouse', 'mouse.click');
     const result = await clickMouse?.({
       session: copySession(record.session),
@@ -463,7 +522,7 @@ export class LocalDesktopBridge implements DesktopBridge {
 
   async typeKeyboard(input: { sessionId: string; text: string } & BridgeOperationOptions): Promise<CommandResult> {
     requireNonEmpty(input.text, 'text');
-    const record = await this.requireActiveRecord(input.sessionId, 'keyboard.type', operationResource(input));
+    const record = await this.requireActiveRecord(input.sessionId, 'keyboard.type', operationResource(input), input.token);
     const typeKeyboard = this.requireDesktopAdapterMethod('typeKeyboard', 'keyboard.type');
     const result = await typeKeyboard?.({
       session: copySession(record.session),
@@ -479,7 +538,7 @@ export class LocalDesktopBridge implements DesktopBridge {
   }
 
   async readClipboard(input: { sessionId: string } & BridgeOperationOptions): Promise<{ text: string }> {
-    const record = await this.requireActiveRecord(input.sessionId, 'clipboard.read', operationResource(input));
+    const record = await this.requireActiveRecord(input.sessionId, 'clipboard.read', operationResource(input), input.token);
     const readClipboard = this.requireDesktopAdapterMethod('readClipboard', 'clipboard.read');
     const result = await readClipboard?.(sessionContext(record.session, record.worker)) ?? { text: record.clipboard };
     await this.audit('clipboard.read', 'ok', record.session, {
@@ -491,7 +550,7 @@ export class LocalDesktopBridge implements DesktopBridge {
   }
 
   async writeClipboard(input: { sessionId: string; text: string } & BridgeOperationOptions): Promise<CommandResult> {
-    const record = await this.requireActiveRecord(input.sessionId, 'clipboard.write', operationResource(input));
+    const record = await this.requireActiveRecord(input.sessionId, 'clipboard.write', operationResource(input), input.token);
     record.clipboard = input.text;
     const writeClipboard = this.requireDesktopAdapterMethod('writeClipboard', 'clipboard.write');
     const result = await writeClipboard?.({
@@ -532,7 +591,7 @@ export class LocalDesktopBridge implements DesktopBridge {
   }
 
   async openInspectionStream(input: { sessionId: string } & BridgeOperationOptions): Promise<InspectionStream> {
-    const record = await this.requireActiveRecord(input.sessionId, 'session.stream.open', operationResource(input));
+    const record = await this.requireActiveRecord(input.sessionId, 'session.stream.open', operationResource(input), input.token);
     if (!this.browserAdapter.openInspectionStream) {
       throw new ValidationError('inspection stream is unavailable for this browser adapter');
     }
@@ -546,7 +605,7 @@ export class LocalDesktopBridge implements DesktopBridge {
   }
 
   async readDropFile(input: { sessionId: string; relativePath: string } & BridgeOperationOptions): Promise<{ contents: string }> {
-    const record = await this.requireActiveRecord(input.sessionId, 'file.readDrop', operationResource(input));
+    const record = await this.requireActiveRecord(input.sessionId, 'file.readDrop', operationResource(input), input.token);
     const path = await resolveExistingDropPath(record.session.dropDir, input.relativePath);
     const file = await openDropFileNoFollow(path, 'r');
     let contents: string;
@@ -563,7 +622,7 @@ export class LocalDesktopBridge implements DesktopBridge {
   }
 
   async writeDropFile(input: { sessionId: string; relativePath: string; contents: string } & BridgeOperationOptions): Promise<void> {
-    const record = await this.requireActiveRecord(input.sessionId, 'file.writeDrop', operationResource(input));
+    const record = await this.requireActiveRecord(input.sessionId, 'file.writeDrop', operationResource(input), input.token);
     const path = resolveLexicalDropPath(record.session.dropDir, input.relativePath);
     await ensureDropParentPath(record.session.dropDir, dirname(path));
     const file = await openDropFileNoFollow(path, 'w');
@@ -583,8 +642,9 @@ export class LocalDesktopBridge implements DesktopBridge {
     sessionId: string,
     operation: DesktopBridgeOperation,
     resource?: Record<string, unknown>,
+    token?: import('@fagaos/policy').CapabilityToken,
   ): Promise<SessionRecord> {
-    const record = await this.requireRecord(sessionId, operation, {}, resource);
+    const record = await this.requireRecord(sessionId, operation, token ? { token } : {}, resource);
     if (record.session.status === 'timed_out') {
       throw new TimeoutError(`session ${sessionId} timed out`);
     }
@@ -601,11 +661,11 @@ export class LocalDesktopBridge implements DesktopBridge {
   private async requireRecord(
     sessionId: string,
     operation: DesktopBridgeOperation,
-    options: { allowTerminated?: boolean } = {},
+    options: { allowTerminated?: boolean; token?: import('@fagaos/policy').CapabilityToken } = {},
     resource?: Record<string, unknown>,
   ): Promise<SessionRecord> {
     const record = this.sessions.get(sessionId);
-    await this.requireCapability(operation, compactObject({ sessionId, appId: record?.session.appId, resource }));
+    await this.requireCapability(operation, compactObject({ sessionId, appId: record?.session.appId, resource, ...(options.token ? { token: options.token } : {}) }));
     if (!record) {
       throw new ValidationError(`unknown session ${sessionId}`);
     }
@@ -617,7 +677,7 @@ export class LocalDesktopBridge implements DesktopBridge {
 
   private async requireCapability(
     operation: DesktopBridgeOperation,
-    input: { sessionId?: string; appId?: string; resource?: Record<string, unknown> } = {},
+    input: { sessionId?: string; appId?: string; resource?: Record<string, unknown>; token?: import('@fagaos/policy').CapabilityToken } = {},
   ): Promise<void> {
     const decision = await this.capabilityVerifier({
       operation,

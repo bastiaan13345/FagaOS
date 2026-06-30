@@ -13,6 +13,7 @@
     "test": "vitest run --root ../.."
   },
   "dependencies": {
-    "@fagaos/audit-log": "*"
+    "@fagaos/audit-log": "*",
+    "@fagaos/policy": "*"
   }
 }
