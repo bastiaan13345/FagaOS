@@ -1,10 +1,13 @@
 /**
- * Google Calendar connector (read-only).
+ * Google Calendar connector (read-only / production-write capable).
  *
  * Implements:
  *   - calendar.calendars.list → calendarList.list
  *   - calendar.events.list    → events.list with optional syncToken
  *   - calendar.events.get     → events.get
+ *   - calendar.events.create  → events.insert
+ *   - calendar.events.update  → events.patch (with If-Match etag)
+ *   - calendar.events.delete  → events.delete
  *
  * Sync strategy: the connector stores a `syncToken` per
  * (account_id, calendar_id). On 410 GONE the gateway wipes the token
@@ -15,6 +18,11 @@
  * Push: a `processWatchNotification()` helper decodes a Pub/Sub push
  * for `events.watch`. The gateway treats the notification as "a
  * change happened; run `events.list` with the stored syncToken".
+ *
+ * Production OAuth: the `gmail.send` companion surface is
+ * `calendar.events` plus `calendar.calendarlist` (read) or
+ * `calendar.events.owned` (write). Token refresh is handled by the
+ * gateway; the connector never holds the refresh token.
  */
 import type { AuditLog } from '@fagaos/core';
 import { ConnectorError } from '../../errors.js';
@@ -25,7 +33,10 @@ import type {
   ConnectorRequest,
   DmConversationsListResult,
   DmSendResult,
+  EventCreateResult,
+  EventDeleteResult,
   EventGetResult,
+  EventUpdateResult,
   EventsListResult,
   MailGetResult,
   MailListResult,
@@ -39,6 +50,11 @@ import {
 } from '../../models/schemas.js';
 import { z } from 'zod';
 import type { GoogleTokenProvider } from '../../oauth/google.js';
+import {
+  EventCreateArgsSchema,
+  EventDeleteArgsSchema,
+  EventUpdateArgsSchema,
+} from '../stub/calendar.js';
 
 const CALENDAR_API = 'https://www.googleapis.com/calendar/v3';
 
@@ -49,11 +65,6 @@ export interface GoogleCalendarConnectorOptions {
   read_only?: boolean;
 }
 
-/**
- * Argument schemas for the Google Calendar connector. Named with a
- * `Gcal` prefix to keep them distinct from the stub's schemas while
- * preserving the shape.
- */
 export const GcalCalendarsListArgsSchema = z.object({}).strict();
 export const GcalEventsListArgsSchema = z.object({
   calendar_id: z.string().min(1).default('primary'),
@@ -68,12 +79,19 @@ export const GcalEventGetArgsSchema = z.object({
   event_id: z.string().min(1),
 });
 
+// Re-export the calendar write argument schemas so other connectors
+// (Outlook Calendar, CalDAV, …) can share the same input shape.
+export { EventCreateArgsSchema, EventUpdateArgsSchema, EventDeleteArgsSchema } from '../stub/calendar.js';
+
 export class GoogleCalendarConnector implements Connector {
   readonly id: ConnectorId = 'google_calendar';
   readonly operations = [
     'calendar.calendars.list',
     'calendar.events.list',
     'calendar.events.get',
+    'calendar.events.create',
+    'calendar.events.update',
+    'calendar.events.delete',
   ] as const;
 
   private readonly tokens: GoogleTokenProvider;
@@ -132,6 +150,88 @@ export class GoogleCalendarConnector implements Connector {
     return { event: this.normaliseEvent(request.account.id, args.calendar_id, out) };
   }
 
+  async createEvent(request: ConnectorRequest, _audit: AuditLog): Promise<EventCreateResult> {
+    if (this.readOnly) {
+      throw new ConnectorError('forbidden', 'GoogleCalendarConnector is in read-only mode for this build');
+    }
+    const args = EventCreateArgsSchema.parse(request.args);
+    const calendar_id = args.calendar_id ?? 'primary';
+    const token = await this.tokens.accessToken({
+      account_id: request.account.id,
+      scopes: ['https://www.googleapis.com/auth/calendar.events.owned'],
+    });
+    const url = `${this.apiBase}/calendars/${encodeURIComponent(calendar_id)}/events?sendUpdates=all`;
+    const res = await this.fetchImpl(url, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(toGoogleEventInput(args)),
+    });
+    if (!res.ok) {
+      throw new ConnectorError('provider_error', `events.insert failed: ${res.status} ${res.statusText}`, await safeText(res));
+    }
+    const out = (await res.json()) as GoogleEvent;
+    return { event: this.normaliseEvent(request.account.id, calendar_id, out) };
+  }
+
+  async updateEvent(request: ConnectorRequest, _audit: AuditLog): Promise<EventUpdateResult> {
+    if (this.readOnly) {
+      throw new ConnectorError('forbidden', 'GoogleCalendarConnector is in read-only mode for this build');
+    }
+    const args = EventUpdateArgsSchema.parse(request.args);
+    const calendar_id = args.calendar_id ?? 'primary';
+    const token = await this.tokens.accessToken({
+      account_id: request.account.id,
+      scopes: ['https://www.googleapis.com/auth/calendar.events.owned'],
+    });
+    const url = `${this.apiBase}/calendars/${encodeURIComponent(calendar_id)}/events/${encodeURIComponent(args.event_id)}?sendUpdates=all`;
+    const res = await this.fetchImpl(url, {
+      method: 'PATCH',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+        'if-match': args.etag,
+      },
+      body: JSON.stringify(toGoogleEventPatch(args)),
+    });
+    if (res.status === 412) {
+      throw new ConnectorError('idempotency_conflict', 'etag mismatch; the event changed on the server');
+    }
+    if (!res.ok) {
+      throw new ConnectorError('provider_error', `events.patch failed: ${res.status} ${res.statusText}`, await safeText(res));
+    }
+    const out = (await res.json()) as GoogleEvent;
+    return { event: this.normaliseEvent(request.account.id, calendar_id, out) };
+  }
+
+  async deleteEvent(request: ConnectorRequest, _audit: AuditLog): Promise<EventDeleteResult> {
+    if (this.readOnly) {
+      throw new ConnectorError('forbidden', 'GoogleCalendarConnector is in read-only mode for this build');
+    }
+    const args = EventDeleteArgsSchema.parse(request.args);
+    const calendar_id = args.calendar_id ?? 'primary';
+    const token = await this.tokens.accessToken({
+      account_id: request.account.id,
+      scopes: ['https://www.googleapis.com/auth/calendar.events.owned'],
+    });
+    const url = `${this.apiBase}/calendars/${encodeURIComponent(calendar_id)}/events/${encodeURIComponent(args.event_id)}?sendUpdates=all`;
+    const res = await this.fetchImpl(url, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (res.status === 404) {
+      return;
+    }
+    if (res.status === 410) {
+      throw new ConnectorError('reauth_required', 'calendar sync token expired; full re-sync required');
+    }
+    if (!res.ok) {
+      throw new ConnectorError('provider_error', `events.delete failed: ${res.status} ${res.statusText}`, await safeText(res));
+    }
+  }
+
   // Operations the connector does not implement.
   async listMessages(): Promise<MailListResult> {
     throw new ConnectorError('not_found', 'GoogleCalendarConnector does not implement mail operations');
@@ -140,6 +240,12 @@ export class GoogleCalendarConnector implements Connector {
     throw new ConnectorError('not_found', 'GoogleCalendarConnector does not implement mail operations');
   }
   async sendMessage(): Promise<MailSendResult> {
+    throw new ConnectorError('not_found', 'GoogleCalendarConnector does not implement mail operations');
+  }
+  async replyMessage(): Promise<never> {
+    throw new ConnectorError('not_found', 'GoogleCalendarConnector does not implement mail operations');
+  }
+  async forwardMessage(): Promise<never> {
     throw new ConnectorError('not_found', 'GoogleCalendarConnector does not implement mail operations');
   }
   async listConversations(): Promise<DmConversationsListResult> {
@@ -153,13 +259,6 @@ export class GoogleCalendarConnector implements Connector {
   // Push
   // -------------------------------------------------------------------------
 
-  /**
-   * Decode a Pub/Sub push for `events.watch`. The connector returns
-   * the `channelId` and `resourceId` so the gateway can resume the
-   * channel. We do not implement actual channel re-creation in
-   * Phase 1; the gateway persists the ids and re-`watch`es when they
-   * expire (7 days).
-   */
   processWatchNotification(notification: unknown): { channel_id: string; resource_id: string } {
     if (
       typeof notification !== 'object' ||
@@ -185,10 +284,6 @@ export class GoogleCalendarConnector implements Connector {
     return { channel_id: obj['channel_id'], resource_id: obj['resource_id'] };
   }
 
-  /**
-   * `events.watch` start. Returns the new channel id and resource id
-   * so the gateway can persist them.
-   */
   async watch(args: {
     account_id: string;
     calendar_id: string;
@@ -233,7 +328,6 @@ export class GoogleCalendarConnector implements Connector {
     });
     if (res.status === 404) throw new ConnectorError('not_found', `calendar api 404: ${url}`);
     if (res.status === 410) {
-      // Caller wipes the stored syncToken and retries without it.
       throw new ConnectorError('reauth_required', 'sync token expired; full re-sync required');
     }
     if (res.status === 401 || res.status === 403) {
@@ -288,6 +382,73 @@ export class GoogleCalendarConnector implements Connector {
       provider_ref: { provider: 'google_calendar', native_id: raw.id, etag: raw.etag },
     });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Wire-format helpers
+// ---------------------------------------------------------------------------
+
+type GcalEventCreateInput = {
+  title: string;
+  description?: string | undefined;
+  start: { tz: string; at: string };
+  end: { tz: string; at: string };
+  all_day?: boolean | undefined;
+  attendees?: Array<{ address: string; name?: string | undefined; optional?: boolean | undefined }> | undefined;
+  conference?: { provider: 'google_meet' | 'teams' | 'other'; join_url?: string | undefined } | undefined;
+};
+
+function toGoogleEventInput(args: GcalEventCreateInput): Record<string, unknown> {
+  const allDay = args.all_day ?? false;
+  return {
+    summary: args.title,
+    description: args.description,
+    start: allDay
+      ? { date: args.start.at.slice(0, 10) }
+      : { dateTime: args.start.at, timeZone: args.start.tz },
+    end: allDay
+      ? { date: args.end.at.slice(0, 10) }
+      : { dateTime: args.end.at, timeZone: args.end.tz },
+    attendees: (args.attendees ?? []).map((a) => ({
+      email: a.address,
+      displayName: a.name,
+      optional: a.optional ?? false,
+    })),
+    ...(args.conference?.provider === 'google_meet'
+      ? { conferenceData: { createRequest: { requestId: `fagaos-${Date.now()}` } } }
+      : {}),
+  };
+}
+
+function toGoogleEventPatch(args: {
+  title?: string | undefined;
+  description?: string | undefined;
+  start?: { tz: string; at: string } | undefined;
+  end?: { tz: string; at: string } | undefined;
+  all_day?: boolean | undefined;
+  attendees?: Array<{ address: string; name?: string | undefined; optional?: boolean | undefined }> | undefined;
+}): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (args.title !== undefined) out['summary'] = args.title;
+  if (args.description !== undefined) out['description'] = args.description;
+  if (args.start) {
+    out['start'] = args.all_day
+      ? { date: args.start.at.slice(0, 10) }
+      : { dateTime: args.start.at, timeZone: args.start.tz };
+  }
+  if (args.end) {
+    out['end'] = args.all_day
+      ? { date: args.end.at.slice(0, 10) }
+      : { dateTime: args.end.at, timeZone: args.end.tz };
+  }
+  if (args.attendees) {
+    out['attendees'] = args.attendees.map((a) => ({
+      email: a.address,
+      displayName: a.name,
+      optional: a.optional ?? false,
+    }));
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

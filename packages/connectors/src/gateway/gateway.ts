@@ -333,6 +333,10 @@ export class ConnectorGateway {
         return connector.getMessage(request, this.audit);
       case 'mail.send':
         return connector.sendMessage(request, this.audit);
+      case 'mail.reply':
+        return connector.replyMessage(request, this.audit);
+      case 'mail.forward':
+        return connector.forwardMessage(request, this.audit);
       case 'dm.conversations.list':
         return connector.listConversations(request, this.audit);
       case 'dm.send':
@@ -343,6 +347,12 @@ export class ConnectorGateway {
         return connector.listEvents(request, this.audit);
       case 'calendar.events.get':
         return connector.getEvent(request, this.audit);
+      case 'calendar.events.create':
+        return connector.createEvent(request, this.audit);
+      case 'calendar.events.update':
+        return connector.updateEvent(request, this.audit);
+      case 'calendar.events.delete':
+        return connector.deleteEvent(request, this.audit);
       default: {
         const exhaustive: never = operation;
         throw new Error(`unhandled operation: ${String(exhaustive)}`);
