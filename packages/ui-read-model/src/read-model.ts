@@ -10,7 +10,9 @@
 import { randomUUID } from 'node:crypto';
 import type {
   Account,
+  AccountCapability,
   Calendar,
+  Conversation,
   Event,
   Message,
   Provider,
@@ -45,6 +47,7 @@ export interface ApprovalIntent extends ApprovalIntentInput {
 export interface UiReadModelAdapter {
   listAccounts(): Promise<Account[]>;
   listMessages(filter?: { accountIds?: string[] }): Promise<Message[]>;
+  listConversations(filter?: { accountIds?: string[] }): Promise<Conversation[]>;
   listCalendars(filter?: { accountIds?: string[] }): Promise<Calendar[]>;
   listEvents(filter?: {
     accountIds?: string[] | undefined;
@@ -101,10 +104,26 @@ export interface InboxThreadView {
   };
 }
 
+export interface ConversationThreadView {
+  id: string;
+  accountId: string;
+  channel: Conversation['channel'];
+  participants: string[];
+  preview: string;
+  unreadCount: number;
+  lastActivityAt: string;
+  windowOpenUntil: string | null;
+  affordances: {
+    reply: UiAffordance;
+    draft: UiAffordance;
+  };
+}
+
 export interface InboxView {
   accounts: AccountSummary[];
   banners: ReauthBanner[];
   threads: InboxThreadView[];
+  conversations: ConversationThreadView[];
 }
 
 export interface BuildInboxOptions {
@@ -239,6 +258,7 @@ export interface AuditView {
 export interface MockUiReadModelSeed {
   accounts?: Account[];
   messages?: Message[];
+  conversations?: Conversation[];
   calendars?: Calendar[];
   events?: Event[];
   freeBusy?: FreeBusyBlock[];
@@ -264,13 +284,17 @@ export async function buildInboxView(
   const accounts = await adapter.listAccounts();
   const selected = selectAccounts(accounts, options.accountIds);
   const selectedIds = selected.map((a) => a.id);
-  const messages = await adapter.listMessages({ accountIds: selectedIds });
+  const [messages, conversations] = await Promise.all([
+    adapter.listMessages({ accountIds: selectedIds }),
+    adapter.listConversations({ accountIds: selectedIds }),
+  ]);
   const banners = await reauthBanners(adapter, selected);
 
   return {
     accounts: selected.map(accountSummary),
     banners,
     threads: groupMessagesIntoThreads(messages, selected),
+    conversations: groupConversationsIntoThreads(conversations, selected),
   };
 }
 
@@ -311,7 +335,7 @@ export async function buildCalendarView(
         color: c.color ?? null,
         readOnly: c.read_only,
       })),
-    events: events.map((event) => eventView(event, accounts)),
+    events: events.map((event) => eventView(event, accounts, calendars)),
     freeBusy,
     proposedActions: buildCalendarActions(accounts, calendars),
   };
@@ -358,6 +382,7 @@ export async function buildAuditView(
 export function makeMockUiReadModelAdapter(seed: MockUiReadModelSeed = {}): UiReadModelAdapter {
   const accounts = [...(seed.accounts ?? [])];
   const messages = [...(seed.messages ?? [])];
+  const conversations = [...(seed.conversations ?? [])];
   const calendars = [...(seed.calendars ?? [])];
   const events = [...(seed.events ?? [])];
   const freeBusy = [...(seed.freeBusy ?? [])];
@@ -374,6 +399,12 @@ export function makeMockUiReadModelAdapter(seed: MockUiReadModelSeed = {}): UiRe
     async listMessages(filter = {}) {
       const accountIds = filter.accountIds;
       return messages.filter((m) => !accountIds || accountIds.includes(m.account_id)).map(copy);
+    },
+    async listConversations(filter = {}) {
+      const accountIds = filter.accountIds;
+      return conversations
+        .filter((c) => !accountIds || accountIds.includes(c.account_id))
+        .map(copy);
     },
     async listCalendars(filter = {}) {
       const accountIds = filter.accountIds;
@@ -464,24 +495,17 @@ function groupMessagesIntoThreads(messages: Message[], accounts: Account[]): Inb
       const sorted = [...threadMessages].sort((a, b) => messageTime(a).localeCompare(messageTime(b)));
       const last = sorted.at(-1)!;
       const account = accountById.get(last.account_id);
-      const cannotWrite = account?.status === 'reauth_required';
-      const approvalIntent = createApprovalIntent({
-        action: 'mail.send',
-        accountId: last.account_id,
+      const writeAffordance = mailWriteAffordance(account, {
         resourceId: threadId,
         payload: { threadId },
-        requestedBy: { id: 'user:current', type: 'user' },
       });
-      const writeAffordance: UiAffordance = cannotWrite
-        ? { enabled: false, reason: 'reauth_required' }
-        : { enabled: false, reason: 'approval_required', approvalIntent };
 
       return {
         id: threadId,
         accountId: last.account_id,
         subject: last.subject ?? '(no subject)',
         preview: last.preview,
-        participants: participants(sorted),
+        participants: messageParticipants(sorted),
         unread: sorted.some((m) => !m.status_flags.read),
         lastActivityAt: messageTime(last),
         messages: sorted,
@@ -494,8 +518,42 @@ function groupMessagesIntoThreads(messages: Message[], accounts: Account[]): Inb
     .sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt));
 }
 
-function eventView(event: Event, accounts: Account[]): EventViewItem {
+function groupConversationsIntoThreads(
+  conversations: Conversation[],
+  accounts: Account[],
+): ConversationThreadView[] {
+  const accountById = new Map(accounts.map((account) => [account.id, account]));
+  return [...conversations]
+    .map((conversation) => {
+      const account = accountById.get(conversation.account_id);
+      const writeAffordance = dmWriteAffordance(account, {
+        resourceId: conversation.id,
+        payload: {
+          conversationId: conversation.id,
+          channel: conversation.channel,
+        },
+      });
+      return {
+        id: conversation.id,
+        accountId: conversation.account_id,
+        channel: conversation.channel,
+        participants: conversationParticipants(conversation.participants),
+        preview: conversation.preview ?? '',
+        unreadCount: conversation.unread_count,
+        lastActivityAt: conversation.last_message_at,
+        windowOpenUntil: conversation.window_open_until ?? null,
+        affordances: {
+          reply: writeAffordance,
+          draft: writeAffordance,
+        },
+      };
+    })
+    .sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt));
+}
+
+function eventView(event: Event, accounts: Account[], calendars: Calendar[]): EventViewItem {
   const account = accounts.find((a) => a.id === event.account_id);
+  const calendar = calendars.find((c) => c.id === event.calendar_id);
   return {
     id: event.id,
     accountId: event.account_id,
@@ -506,20 +564,10 @@ function eventView(event: Event, accounts: Account[]): EventViewItem {
     attendeeCount: event.attendees.length,
     status: event.status,
     affordances: {
-      update:
-        account?.status === 'reauth_required'
-          ? { enabled: false, reason: 'reauth_required' }
-          : {
-              enabled: false,
-              reason: 'approval_required',
-              approvalIntent: createApprovalIntent({
-                action: 'calendar.update_event',
-                accountId: event.account_id,
-                resourceId: event.id,
-                payload: { eventId: event.id },
-                requestedBy: { id: 'user:current', type: 'user' },
-              }),
-            },
+      update: calendarEventUpdateAffordance(account, calendar, {
+        resourceId: event.id,
+        payload: { eventId: event.id },
+      }),
     },
   };
 }
@@ -530,21 +578,19 @@ function buildCalendarActions(
 ): ProposedCalendarAction[] {
   return calendars.flatMap((calendar) => {
     const account = accounts.find((a) => a.id === calendar.account_id);
-    if (!account || account.status === 'reauth_required') return [];
-    const intent = createApprovalIntent({
-      action: 'calendar.create_event',
-      accountId: account.id,
+    if (!account) return [];
+    const affordance = calendarCreateAffordance(account, calendar, {
       resourceId: calendar.id,
       payload: { calendarId: calendar.id },
-      requestedBy: { id: 'user:current', type: 'user' },
     });
+    if (affordance.reason !== 'approval_required' || !affordance.approvalIntent) return [];
     return [{
-      id: intent.id,
+      id: affordance.approvalIntent.id,
       action: 'calendar.create_event',
       accountId: account.id,
       calendarId: calendar.id,
       status: 'approval_required',
-      approvalIntent: intent,
+      approvalIntent: affordance.approvalIntent,
     }];
   });
 }
@@ -618,13 +664,108 @@ function auditViewEntry(entry: AuditEntry): AuditViewEntry {
   };
 }
 
-function participants(messages: Message[]): string[] {
+function messageParticipants(messages: Message[]): string[] {
   const values = new Set<string>();
   for (const message of messages) {
     values.add(message.from.name ?? message.from.address);
     for (const contact of message.to) values.add(contact.name ?? contact.address);
   }
   return [...values];
+}
+
+function conversationParticipants(participants: Conversation['participants']): string[] {
+  return participants.map((p) => p.name ?? p.address);
+}
+
+interface IntentSpec {
+  resourceId: string;
+  payload: Record<string, unknown>;
+}
+
+function mailWriteAffordance(account: Account | undefined, spec: IntentSpec): UiAffordance {
+  return emailWriteAffordance(account, 'send_mail', 'mail.send', spec);
+}
+
+function dmWriteAffordance(account: Account | undefined, spec: IntentSpec): UiAffordance {
+  return emailWriteAffordance(account, 'send_dm', 'dm.send', spec);
+}
+
+function emailWriteAffordance(
+  account: Account | undefined,
+  capability: AccountCapability,
+  action: 'mail.send' | 'dm.send',
+  spec: IntentSpec,
+): UiAffordance {
+  if (!account) {
+    return { enabled: false, reason: 'read_only' };
+  }
+  if (account.status === 'reauth_required') {
+    return { enabled: false, reason: 'reauth_required' };
+  }
+  if (!account.capabilities.includes(capability)) {
+    return { enabled: false, reason: 'read_only' };
+  }
+  return {
+    enabled: false,
+    reason: 'approval_required',
+    approvalIntent: createApprovalIntent({
+      action,
+      accountId: account.id,
+      resourceId: spec.resourceId,
+      payload: spec.payload,
+      requestedBy: { id: 'user:current', type: 'user' },
+    }),
+  };
+}
+
+function calendarCreateAffordance(
+  account: Account | undefined,
+  calendar: Calendar,
+  spec: IntentSpec,
+): UiAffordance {
+  return calendarWriteAffordance(account, calendar, spec, 'calendar.create_event');
+}
+
+function calendarEventUpdateAffordance(
+  account: Account | undefined,
+  calendar: Calendar | undefined,
+  spec: IntentSpec,
+): UiAffordance {
+  if (!calendar) {
+    return { enabled: false, reason: 'read_only' };
+  }
+  return calendarWriteAffordance(account, calendar, spec, 'calendar.update_event');
+}
+
+function calendarWriteAffordance(
+  account: Account | undefined,
+  calendar: Calendar,
+  spec: IntentSpec,
+  action: 'calendar.create_event' | 'calendar.update_event',
+): UiAffordance {
+  if (calendar.read_only) {
+    return { enabled: false, reason: 'read_only' };
+  }
+  if (!account) {
+    return { enabled: false, reason: 'read_only' };
+  }
+  if (account.status === 'reauth_required') {
+    return { enabled: false, reason: 'reauth_required' };
+  }
+  if (!account.capabilities.includes('create_event')) {
+    return { enabled: false, reason: 'read_only' };
+  }
+  return {
+    enabled: false,
+    reason: 'approval_required',
+    approvalIntent: createApprovalIntent({
+      action,
+      accountId: account.id,
+      resourceId: spec.resourceId,
+      payload: spec.payload,
+      requestedBy: { id: 'user:current', type: 'user' },
+    }),
+  };
 }
 
 function messageTime(message: Message): string {
