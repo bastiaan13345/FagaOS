@@ -2,10 +2,46 @@
 
 > A capability-based operating system for AI agents. Sandboxing, audit, and inter-agent comms — built to the security model in `docs/architecture.md`.
 
-This repository is the implementation of **FagaOS Phase 0** (issue
-[FAG-8](https://multica.ai/issues/FAG-8)). It lands the monorepo skeleton,
-the CI pipeline, and the first security primitive: an append-only,
-hash-chained, signed-checkpoint audit log.
+This repository is the implementation of **FagaOS Phase 0 through Phase 2**.
+Phase 0 (FAG-8) landed the monorepo skeleton, CI pipeline, and the first
+security primitive — an append-only, hash-chained, signed-checkpoint audit
+log. Phase 1 and Phase 2 have since added the policy engine, connector
+gateway, desktop/browser bridge, control-plane state, and the first UI
+read models.
+
+Use the status tables below to see what has already shipped and what is
+still in flight.
+
+## Project status
+
+### Shipped
+
+| Phase | Issue | Deliverable |
+|-------|-------|-------------|
+| Phase 0 | [FAG-8](https://multica.ai/issues/FAG-8) | Monorepo, CI, audit log primitive |
+| Phase 1 | [FAG-9](https://multica.ai/issues/FAG-9) | Agent manifest / AgentCard schema |
+| Phase 1 | [FAG-10](https://multica.ai/issues/FAG-10) | Unified monorepo layout |
+| Phase 1 | [FAG-11](https://multica.ai/issues/FAG-11) | Connector gateway skeleton |
+| Phase 1 | [FAG-12](https://multica.ai/issues/FAG-12) | QA harness + adversarial corpus |
+| Phase 1 | [FAG-13](https://multica.ai/issues/FAG-13) | Policy engine + capability tokens |
+| Phase 1 | [FAG-15](https://multica.ai/issues/FAG-15) | Sandboxed desktop/browser PoC |
+| Phase 2 | [FAG-22](https://multica.ai/issues/FAG-22) | Repository, PR flow, deployment packaging |
+| Phase 2 | [FAG-24](https://multica.ai/issues/FAG-24) | Policy, secrets, and capability hardening |
+| Phase 2 | [FAG-26](https://multica.ai/issues/FAG-26) | Production desktop and browser runtime |
+| Phase 2 | [FAG-27](https://multica.ai/issues/FAG-27) | Release-gating QA + security hardening |
+| Phase 2 | [FAG-29](https://multica.ai/issues/FAG-29) | Agent, task, and session operations UI |
+| Phase 2 | [FAG-30](https://multica.ai/issues/FAG-30) | Workspace shell and navigation |
+| Phase 2 | [FAG-31](https://multica.ai/issues/FAG-31) | Approvals, notifications, and escalation |
+| Phase 2 | [FAG-33](https://multica.ai/issues/FAG-33) | Inboxes, calendar, browser sessions, and audit log read model |
+
+### In progress
+
+| Issue | Deliverable |
+|-------|-------------|
+| [FAG-25](https://multica.ai/issues/FAG-25) | Production connector expansion and write operations (merged to `main`; coverage gaps being closed) |
+| [FAG-32](https://multica.ai/issues/FAG-32) | Onboarding and account linking |
+| [FAG-114](https://multica.ai/issues/FAG-114) | README progress + active work-in-progress update |
+| [FAG-115](https://multica.ai/issues/FAG-115) | Docker packaging for cross-device replication |
 
 ## Project goals
 
@@ -69,26 +105,35 @@ context from `docs/architecture.md`.
 ```
 fagaos/
 ├── packages/
-│   ├── core/              @fagaos/core      orchestrator, scheduler, audit log
-│   ├── policy/            @fagaos/policy    Policy Engine (Cedar) — interface only in v0
-│   ├── runtime/           @fagaos/runtime   sandboxed execution plane (WASM, seccomp, gVisor)
-│   ├── connectors/        @fagaos/connectors  Gmail / WhatsApp / Calendar contracts
-│   └── desktop-bridge/    @fagaos/desktop-bridge  sandboxed desktop/browser control
+│   ├── agent-manifest/    @fagaos/agent-manifest  typed AgentManifest / AgentCard schema
+│   ├── audit-log/         @fagaos/audit-log       append-only hash-chained audit log
+│   ├── connectors/        @fagaos/connectors      email / messaging / calendar connector gateway
+│   ├── control-plane/     @fagaos/control-plane   session, task, scheduler, tool-invocation API stubs
+│   ├── core/              @fagaos/core            orchestrator primitives
+│   ├── desktop-bridge/    @fagaos/desktop-bridge  sandboxed desktop/browser control
+│   ├── policy/            @fagaos/policy          policy engine, secret store, capability tokens
+│   ├── qa-harness/        @fagaos/qa-harness      sandbox + connector contract + adversarial tests
+│   ├── runtime/           @fagaos/runtime         sandboxed execution plane
+│   ├── ui-read-model/     @fagaos/ui-read-model   typed read models for UI surfaces
+│   └── workspace-shell/   @fagaos/workspace-shell workspace layout + navigation
 ├── apps/
-│   └── control-plane-server/  @fagaos/control-plane-server deployable HTTP server
-├── docs/                  architecture, release flow, risk register, QA strategy
-├── .github/workflows/     CI (lint, typecheck, tests, coverage and packaging gates)
+│   └── control-plane-server/  @fagaos/control-plane-server  deployable HTTP server
+├── docs/                  architecture, release flow, risk register, QA strategy, operations
+├── scripts/               local verification + packaging scripts
+├── .github/workflows/     CI (lint, typecheck, tests, coverage, packaging gates)
 ├── package.json           workspaces manifest + scripts
 ├── tsconfig.json          shared strict TS config
 ├── vitest.config.ts       test runner + coverage thresholds
+├── Dockerfile             container build for control-plane server
+├── docker-compose.yml     one-command local deployment
 └── README.md              you are here
 ```
 
-The five packages are interface-first in Phase 0. The only one with
-real implementation in this drop is `@fagaos/core`, specifically the
-audit log primitive. The rest ship their TypeScript contracts so
-downstream teams (FAG-4 desktop, FAG-5 connectors, FAG-7 adversarial
-tests) can start integrating against stable shapes.
+The packages are interface-first in Phase 0 and have been progressively
+filled in during Phase 1 and Phase 2. The audit log primitive remains the
+canonical security primitive; the policy engine, connector gateway, and
+desktop bridge now have concrete implementations behind their original
+contracts.
 
 ## Local setup
 
@@ -114,8 +159,9 @@ npm run test:coverage   # with coverage report
 npm run verify
 ```
 
-This runs lint, typecheck, the test suite with the coverage gate, and
-deployment packaging verification. The coverage gate is:
+This runs lint, typecheck, the test suite with the coverage gate,
+deployment packaging verification, dependency audit, and the release
+gate. The coverage gate is:
 
 - ≥ 90% line coverage on `packages/core/src/audit/**` (the critical
   path — see the QA strategy)
@@ -170,6 +216,21 @@ The file-backed backend is the local development implementation behind
 the `ControlPlaneRepository` interface. See
 [`docs/control-plane-state.md`](docs/control-plane-state.md) for the
 storage model and scheduler lifecycle semantics.
+
+### Run with Docker
+
+For a reproducible cross-device deployment:
+
+```bash
+docker compose up -d
+# health check
+curl http://localhost:8080/healthz
+```
+
+The Compose file mounts a persistent volume at `/app/data` for the
+control-plane state file and exposes the server on port `8080`. See
+[`Dockerfile`](Dockerfile) and [`docker-compose.yml`](docker-compose.yml)
+for build details and configuration options.
 
 ## The audit log primitive
 
@@ -246,22 +307,22 @@ the threat model the chain is designed to detect. The test suite
 covers the four scenarios: actor modification, action modification,
 payload modification, and a dropped entry.
 
-## Out of scope for Phase 0
+## Out of scope for the current phase
 
 Per the FAG-8 issue body and the architecture doc:
 
-- **Connector implementations** (FAG-5). The `@fagaos/connectors`
-  package ships the contract, not any concrete Gmail / WhatsApp /
-  Calendar code.
-- **Desktop/browser runtime** (FAG-4). The `@fagaos/desktop-bridge`
-  package ships the contract. The full Layer 4 isolation design lives
-  in the FAG-4 deliverable.
-- **Policy engine binding.** The `@fagaos/policy` package ships the
-  contract. Phase 1 will bind to Cedar.
+- **Full connector staging validation** (FAG-25 follow-up). The
+  connector gateway has production-capable provider implementations and
+  contract tests, but not all providers have been exercised against real
+  staging accounts yet.
+- **Product onboarding UI** (FAG-32). The backend account-linking and
+  safe-default policy models are in progress; the full React/TSX
+  onboarding flow ships in the FAG-32 follow-on.
 - **Full orchestrator and capability broker.** The control-plane now
-  includes durable session/task storage and scheduler lifecycle state;
-  full orchestration and policy-backed capability minting still land
-  in later phases per the architecture doc's §12 roadmap.
+  includes durable session/task storage, scheduler lifecycle state,
+  approvals, notifications, and policy-backed capability enforcement;
+  full autonomous orchestration still lands in later phases per the
+  architecture doc's §12 roadmap.
 
 ## Contributing
 
@@ -298,9 +359,15 @@ Per the FAG-8 issue body and the architecture doc:
   test pyramid that drive the coverage thresholds
 - [`docs/release-flow.md`](docs/release-flow.md) — trunk strategy, PR
   policy, release tags, and deployment packaging verification
+- [`docs/policy-secrets.md`](docs/policy-secrets.md) — production policy,
+  secrets, and capability token model
+- [`docs/operations-recovery.md`](docs/operations-recovery.md) — on-call
+  runbook for key compromise, rotation, and recovery
+- [`docs/connectors.md`](docs/connectors.md) — connector gateway surface,
+  provider matrix, and failure modes
 - FAG-6 (core platform architecture) — completed
 - FAG-7 (QA strategy) — completed
-- FAG-8 (this phase) — in review
+- FAG-8 (Phase 0 monorepo + audit log) — completed
 
 ## License
 
