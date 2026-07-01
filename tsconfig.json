@@ -28,6 +28,7 @@
     { "path": "./packages/control-plane" },
     { "path": "./packages/core" },
     { "path": "./packages/desktop-bridge" },
+    { "path": "./packages/onboarding" },
     { "path": "./packages/policy" },
     { "path": "./packages/qa-harness" },
     { "path": "./packages/runtime" },
