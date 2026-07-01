@@ -33,6 +33,17 @@ function makeToken() {
   };
 }
 
+function makeRequest(account: Account, operation: 'mail.send' | 'mail.reply' | 'mail.forward' | 'calendar.events.create' | 'calendar.events.update' | 'calendar.events.delete', args: unknown) {
+  return {
+    token: makeToken(),
+    account,
+    operation,
+    args,
+    idempotency_key: 'k',
+    trace_id: 't',
+  };
+}
+
 describe('StubEmailConnector', () => {
   const c = new StubEmailConnector();
 
@@ -78,6 +89,48 @@ describe('StubEmailConnector', () => {
         {} as never,
       ),
     ).rejects.toMatchObject({ code: 'not_found' });
+  });
+
+  it('replyMessage returns a stable stub id derived from the inputs', async () => {
+    const account = makeAccount('gmail');
+    const out = await c.replyMessage(
+      makeRequest(account, 'mail.reply', { message_id: 'm1', body: 'thanks', reply_all: true }),
+      {} as never,
+    );
+    expect(out.provider_message_id).toMatch(/^stub-reply-/);
+    expect(out.thread_id).toBe('stub-thread-m1');
+  });
+
+  it('replyMessage produces different ids for different inputs', async () => {
+    const account = makeAccount('gmail');
+    const a = await c.replyMessage(
+      makeRequest(account, 'mail.reply', { message_id: 'm1', body: 'thanks', reply_all: false }),
+      {} as never,
+    );
+    const b = await c.replyMessage(
+      makeRequest(account, 'mail.reply', { message_id: 'm2', body: 'thanks', reply_all: false }),
+      {} as never,
+    );
+    expect(a.provider_message_id).not.toBe(b.provider_message_id);
+  });
+
+  it('forwardMessage returns a stub id for valid forward args', async () => {
+    const account = makeAccount('gmail');
+    const out = await c.forwardMessage(
+      makeRequest(account, 'mail.forward', { message_id: 'm1', to: ['x@example.com'], body: 'fyi' }),
+      {} as never,
+    );
+    expect(out.provider_message_id).toMatch(/^stub-fwd-/);
+  });
+
+  it('rejects every calendar-shaped operation with not_found', async () => {
+    const account = makeAccount('gmail');
+    await expect(c.getEvent()).rejects.toMatchObject({ code: 'not_found' });
+    await expect(c.createEvent()).rejects.toMatchObject({ code: 'not_found' });
+    await expect(c.updateEvent()).rejects.toMatchObject({ code: 'not_found' });
+    await expect(c.deleteEvent()).rejects.toMatchObject({ code: 'not_found' });
+    await expect(c.listEvents()).rejects.toMatchObject({ code: 'not_found' });
+    void account;
   });
 });
 
@@ -127,6 +180,64 @@ describe('StubCalendarConnector', () => {
     expect(event.event.id).toBeTruthy();
   });
 
+  it('createEvent returns a deterministic event with a stub id and etag', async () => {
+    const account = makeAccount('google_calendar');
+    const out = await c.createEvent(
+      makeRequest(account, 'calendar.events.create', {
+        title: 'standup',
+        start: { tz: 'UTC', at: '2025-01-01T10:00:00.000Z' },
+        end: { tz: 'UTC', at: '2025-01-01T11:00:00.000Z' },
+        attendees: [{ address: 'x@example.com', name: 'X', optional: true }],
+      }),
+      {} as never,
+    );
+    expect(out.event.id).toMatch(/^stub-event-a1-[0-9a-f]{8}$/);
+    expect(out.event.title).toBe('standup');
+    expect(out.event.status).toBe('confirmed');
+    expect(out.event.attendees[0]?.optional).toBe(true);
+    expect(out.event.provider_ref?.etag).toMatch(/^stub-etag-stub-event-a1-/);
+  });
+
+  it('updateEvent merges args onto the existing event and stamps the new etag', async () => {
+    const account = makeAccount('google_calendar');
+    const out = await c.updateEvent(
+      makeRequest(account, 'calendar.events.update', {
+        event_id: 'evt_1',
+        etag: 'new-etag',
+        title: 'updated title',
+        all_day: true,
+      }),
+      {} as never,
+    );
+    expect(out.event.title).toBe('updated title');
+    expect(out.event.all_day).toBe(true);
+    expect(out.event.provider_ref?.etag).toBe('new-etag');
+  });
+
+  it('updateEvent falls back to the existing attendees when none are supplied', async () => {
+    const account = makeAccount('google_calendar');
+    const out = await c.updateEvent(
+      makeRequest(account, 'calendar.events.update', {
+        event_id: 'evt_1',
+        etag: 'new-etag',
+      }),
+      {} as never,
+    );
+    // The existing event's attendees array should be preserved.
+    expect(out.event.attendees.length).toBeGreaterThan(0);
+    expect(out.event.provider_ref?.etag).toBe('new-etag');
+  });
+
+  it('deleteEvent resolves with no value', async () => {
+    const account = makeAccount('google_calendar');
+    await expect(
+      c.deleteEvent(
+        makeRequest(account, 'calendar.events.delete', { event_id: 'evt_1' }),
+        {} as never,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
   it('rejects mail-shaped operations', async () => {
     await expect(
       c.listMessages(
@@ -143,6 +254,8 @@ describe('StubCalendarConnector', () => {
     ).rejects.toMatchObject({ code: 'not_found' });
     await expect(c.getMessage()).rejects.toMatchObject({ code: 'not_found' });
     await expect(c.sendMessage()).rejects.toMatchObject({ code: 'not_found' });
+    await expect(c.replyMessage()).rejects.toMatchObject({ code: 'not_found' });
+    await expect(c.forwardMessage()).rejects.toMatchObject({ code: 'not_found' });
     await expect(c.listConversations()).rejects.toMatchObject({ code: 'not_found' });
     await expect(c.sendDm()).rejects.toMatchObject({ code: 'not_found' });
   });
