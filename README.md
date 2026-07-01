@@ -42,6 +42,7 @@ still in flight.
 | [FAG-32](https://multica.ai/issues/FAG-32) | Onboarding and account linking |
 | [FAG-114](https://multica.ai/issues/FAG-114) | README progress + active work-in-progress update |
 | [FAG-115](https://multica.ai/issues/FAG-115) | Docker packaging for cross-device replication |
+| [FAG-130](https://multica.ai/issues/FAG-130) | Next.js frontend app shell with workspace routing |
 
 ## Project goals
 
@@ -117,7 +118,8 @@ fagaos/
 │   ├── ui-read-model/     @fagaos/ui-read-model   typed read models for UI surfaces
 │   └── workspace-shell/   @fagaos/workspace-shell workspace layout + navigation
 ├── apps/
-│   └── control-plane-server/  @fagaos/control-plane-server  deployable HTTP server
+│   ├── control-plane-server/  @fagaos/control-plane-server  deployable HTTP server
+│   └── web/                   @fagaos/web                   Next.js 14 operator console (FAG-130)
 ├── docs/                  architecture, release flow, risk register, QA strategy, operations
 ├── scripts/               local verification + packaging scripts
 ├── .github/workflows/     CI (lint, typecheck, tests, coverage, packaging gates)
@@ -225,12 +227,37 @@ For a reproducible cross-device deployment:
 docker compose up -d
 # health check
 curl http://localhost:8080/healthz
+curl http://localhost:3000/health
 ```
 
 The Compose file mounts a persistent volume at `/app/data` for the
-control-plane state file and exposes the server on port `8080`. See
-[`Dockerfile`](Dockerfile) and [`docker-compose.yml`](docker-compose.yml)
-for build details and configuration options.
+control-plane state file and exposes the server on port `8080`. The
+`fagaos-web` service runs the Next.js operator console on port `3000`
+and reads `FAGAOS_CONTROL_PLANE_URL` to find the control plane. See
+[`Dockerfile`](Dockerfile), [`apps/web/Dockerfile`](apps/web/Dockerfile),
+and [`docker-compose.yml`](docker-compose.yml) for build details and
+configuration options.
+
+### Run the product web app locally
+
+The web app is a Next.js 14 application in `apps/web` (FAG-130). It
+talks to the control-plane server over HTTP and renders the workspace
+shell. In two terminals:
+
+```bash
+# 1. boot the control-plane server (defaults to http://127.0.0.1:8080)
+npm run dev --workspace @fagaos/control-plane-server
+
+# 2. boot the web app
+FAGAOS_CONTROL_PLANE_URL=http://127.0.0.1:8080 npm run dev --workspace @fagaos/web
+```
+
+The web app is then reachable at <http://localhost:3000>:
+- `/dashboard` — operator overview (default landing page)
+- `/agents`, `/tasks`, `/sessions`, `/inboxes`, `/calendar`,
+  `/browser-desktop`, `/approvals`, `/audit-log`, `/settings` —
+  the persistent navigation views
+- `/health` — control-plane health check
 
 ## The audit log primitive
 
