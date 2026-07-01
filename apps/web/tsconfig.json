@@ -1,0 +1,63 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "noEmit": true,
+    "jsx": "preserve",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "allowJs": false,
+    "incremental": true,
+    "tsBuildInfoFile": "./dist/.tsbuildinfo",
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": [
+        "./src/*"
+      ]
+    },
+    "types": [
+      "node",
+      "vitest/globals",
+      "@testing-library/jest-dom"
+    ],
+    "isolatedModules": true
+  },
+  "include": [
+    "next-env.d.ts",
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "tests/**/*.ts",
+    "tests/**/*.tsx",
+    "next.config.mjs",
+    "tailwind.config.ts",
+    "postcss.config.mjs",
+    "vitest.config.ts",
+    ".next/types/**/*.ts"
+  ],
+  "exclude": [
+    "dist",
+    "node_modules",
+    ".next"
+  ],
+  "references": [
+    {
+      "path": "../../packages/workspace-shell"
+    },
+    {
+      "path": "../../packages/ui-read-model"
+    },
+    {
+      "path": "../../packages/onboarding"
+    }
+  ]
+}

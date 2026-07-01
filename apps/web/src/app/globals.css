@@ -1,0 +1,109 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background-color: theme('colors.canvas.DEFAULT');
+  color: theme('colors.ink.DEFAULT');
+  font-family: theme('fontFamily.sans');
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+a {
+  color: theme('colors.accent.DEFAULT');
+  text-decoration: none;
+}
+
+a:hover,
+a:focus-visible {
+  text-decoration: underline;
+}
+
+button {
+  font: inherit;
+}
+
+@layer components {
+  .workspace-shell {
+    @apply grid min-h-screen;
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+
+  @screen md {
+    .workspace-shell {
+      grid-template-columns: 16rem 1fr;
+      grid-template-rows: 1fr;
+    }
+  }
+
+  .workspace-shell__nav {
+    @apply border-b border-canvas-border bg-canvas-subtle p-4;
+  }
+
+  @screen md {
+    .workspace-shell__nav {
+      @apply border-b-0 border-r;
+    }
+  }
+
+  .workspace-shell__brand {
+    @apply mb-4 block text-lg font-semibold text-ink;
+  }
+
+  .workspace-shell__nav nav ul {
+    @apply flex flex-row gap-2 overflow-x-auto md:flex-col md:gap-1 md:overflow-visible;
+  }
+
+  .workspace-shell__nav-link {
+    @apply block rounded-md px-3 py-2 text-sm text-ink-subtle transition hover:bg-canvas-raised hover:text-ink;
+  }
+
+  .workspace-shell__nav-link.is-active {
+    @apply bg-canvas-raised text-ink;
+  }
+
+  .workspace-shell__nav-link.is-denied {
+    @apply text-ink-muted;
+  }
+
+  .workspace-shell__content {
+    @apply p-4 md:p-8;
+  }
+
+  .workspace-shell__dashboard {
+    @apply mb-8 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4;
+  }
+
+  .workspace-shell__dashboard article,
+  .workspace-shell__degraded {
+    @apply rounded-lg border border-canvas-border bg-canvas-surface p-4;
+  }
+
+  .workspace-shell__dashboard h2,
+  .workspace-shell__degraded h2 {
+    @apply mb-1 text-sm font-medium uppercase tracking-wide text-ink-subtle;
+  }
+
+  .workspace-shell__dashboard strong {
+    @apply block text-2xl font-semibold text-ink;
+  }
+
+  .workspace-shell__dashboard span {
+    @apply text-xs text-ink-muted;
+  }
+
+  .workspace-shell__degraded ul {
+    @apply mt-2 list-inside list-disc text-sm text-accent-warn;
+  }
+}
